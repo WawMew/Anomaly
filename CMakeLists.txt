@@ -511,7 +511,7 @@ add_library(anomaly_adapter_services STATIC
 target_include_directories(anomaly_adapter_services PUBLIC include)
 target_compile_definitions(
     anomaly_adapter_services PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_compile_options(anomaly_adapter_services PRIVATE /W4 /permissive- /EHsc)
+target_compile_options(anomaly_adapter_services PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(
     anomaly_adapter_services
     PUBLIC anomaly_symbol_resolver anomaly_hook_manager anomaly_minhook_backend anomaly_ue5_ftext)
@@ -1248,6 +1248,16 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         MANIFEST plugins/NteTeleport/manifest.json
         PACKAGE_NAME NteTeleport
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/NteTeleport")
+    anomaly_add_plugin(anomaly_builtin_nte_vehicle
+        SOURCES plugins/NteVehicle/plugin.cpp
+        MANIFEST plugins/NteVehicle/manifest.json
+        PACKAGE_NAME NteVehicle
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/NteVehicle")
+    anomaly_add_plugin(anomaly_builtin_night999
+        SOURCES plugins/Night999/plugin.cpp
+        MANIFEST plugins/Night999/manifest.json
+        PACKAGE_NAME Night999
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/Night999")
     anomaly_add_plugin(anomaly_builtin_nte_movement_hold TEST_PLUGIN
         SOURCES plugins/NteMovementHold/plugin.cpp
         MANIFEST plugins/NteMovementHold/manifest.json
@@ -1275,6 +1285,15 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         MANIFEST plugins/PinkPawHeistESP/manifest.json
         PACKAGE_NAME PinkPawHeistESP
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/PinkPawHeistESP")
+    if(ANOMALY_BUILD_TEST_FIXTURES)
+        add_executable(anomaly_pink_paw_bank_loop_fixture
+            plugins/PinkPawHeistESP/tests/bank_loop_test.cpp
+            plugins/PinkPawHeistESP/tests/bank_intro_runtime_test.cpp
+            plugins/PinkPawHeistESP/rob_bank_runtime.cpp)
+        target_link_libraries(anomaly_pink_paw_bank_loop_fixture PRIVATE anomaly_sdk)
+        target_include_directories(anomaly_pink_paw_bank_loop_fixture PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_options(anomaly_pink_paw_bank_loop_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
+    endif()
 
     anomaly_add_plugin(anomaly_builtin_fake_uid
         SOURCES plugins/FakeUID/plugin.cpp
@@ -1397,6 +1416,12 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         PACKAGE_NAME CloneEnter
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/CloneEnter")
 
+    anomaly_add_plugin(anomaly_builtin_damage_dashboard
+        SOURCES plugins/DamageDashboard/plugin.cpp
+        MANIFEST plugins/DamageDashboard/manifest.json
+        PACKAGE_NAME DamageDashboard
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/DamageDashboard")
+
     anomaly_add_plugin(anomaly_builtin_nte_free_fly
         SOURCES plugins/NteFreeFly/plugin.cpp
         MANIFEST plugins/NteFreeFly/manifest.json
@@ -1471,6 +1496,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         WIN32_LEAN_AND_MEAN NOMINMAX)
     target_link_libraries(anomaly_builtin_clone_enter PRIVATE anomaly_plugin_combat)
     target_link_libraries(anomaly_builtin_combat_box PRIVATE anomaly_plugin_combat)
+    target_link_libraries(anomaly_builtin_night999 PRIVATE anomaly_plugin_combat)
     if(ANOMALY_BUILD_TEST_FIXTURES)
         add_executable(anomaly_combat_auto_fixture
             plugins/common/combat/tests/auto_combat_test.cpp)
@@ -1574,7 +1600,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
     # Test packages exist only when ANOMALY_BUILD_TEST_PLUGINS is on, so every list that
     # reaches their targets is built from the targets that actually exist.
     set(ANOMALY_BUILTIN_PLUGIN_TARGETS
-        anomaly_builtin_nte_position anomaly_builtin_nte_teleport
+        anomaly_builtin_nte_position anomaly_builtin_nte_teleport anomaly_builtin_nte_vehicle
         anomaly_builtin_entity_esp anomaly_builtin_pink_paw_heist_esp
         anomaly_builtin_fake_uid anomaly_builtin_camera_tools
         anomaly_builtin_camera_blur_fix anomaly_builtin_better_pose
@@ -1583,7 +1609,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         anomaly_builtin_nte_free_fly anomaly_builtin_skin_changer anomaly_builtin_ui_buttons
         anomaly_builtin_dll_loader anomaly_builtin_hifi_vehicle_music
         anomaly_builtin_model_scale anomaly_builtin_autofish
-        anomaly_builtin_deserted anomaly_builtin_jelly)
+        anomaly_builtin_deserted anomaly_builtin_jelly anomaly_builtin_night999)
     if(ANOMALY_BUILD_TEST_PLUGINS)
         list(APPEND ANOMALY_BUILTIN_PLUGIN_TARGETS
             anomaly_builtin_nte_movement_hold
@@ -1597,6 +1623,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
             UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     endforeach()
     if(MSVC)
+        target_compile_options(anomaly_builtin_nte_vehicle PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_pink_paw_heist_esp PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_box_auto PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_combat_box PRIVATE /utf-8)
@@ -1607,6 +1634,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         target_compile_options(anomaly_builtin_ui_buttons PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_deserted PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_hifi_vehicle_music PRIVATE /utf-8)
+        target_compile_options(anomaly_builtin_night999 PRIVATE /utf-8)
     endif()
     add_dependencies(anomaly_test_host ${ANOMALY_BUILTIN_PLUGIN_TARGETS})
     if(TARGET anomaly-platform-preview)
@@ -1639,6 +1667,8 @@ anomaly_stage_platform_preview_plugin(anomaly_example_nte_inspector NteInspector
 anomaly_stage_platform_preview_plugin(anomaly_example_nte_combat_demo NteCombatDemo)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_nte_position NtePosition)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_nte_teleport NteTeleport)
+anomaly_stage_platform_preview_plugin(anomaly_builtin_nte_vehicle NteVehicle)
+anomaly_stage_platform_preview_plugin(anomaly_builtin_night999 Night999)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_nte_navigation NteNavmeshDemo)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_nte_pickup_demo NtePickupDemo)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_entity_esp EntityESP)
