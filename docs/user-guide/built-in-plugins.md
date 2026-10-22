@@ -250,6 +250,26 @@ Actor/Entity 快照。点击 **Export JSON** 会通过 Host storage 原子写出
 出售只在钓鱼间隙执行，库存减少后继续钓鱼。配置与抛竿点由后台任务保存。
 收鱼展示会加速；该插件不提供秒咬钩或跳过遛鱼的实验功能。
 
+## 噗卡乐园
+
+| | |
+| --- | --- |
+| **ID** | `anomaly.local.nte.puka-paradise` |
+| **作用** | 列出附近的噗卡乐园小游戏设施并可直接传送；单独给出花篱秘密园的航点清单、逐个传送与自动巡点；只读显示本机玩家的星票（`PukalandTicket`）余额。 |
+| **依赖服务** | `anomaly.ui`、`anomaly.core`、`anomaly.localization`；`anomaly.nte.actors`、`anomaly.nte.session/player`、`anomaly.nte.player-teleport`、`anomaly.interop.signature`、`anomaly.ue5.names`（均为 V1，可选） |
+| **需要 Profile** | 是（actor 快照与传送桥接依赖已验证符号）；星票读取另需插件自带的 GObjects / ProcessEvent 特征与 `UHTPukalandComponent` 布局 |
+
+**设施** 页按 `HTPukaland*` 反射类族分组显示最近的设施与距离，每一行都能直接传送。
+设施分类覆盖迷宫、命中幸运星（投掷）、打地鼠、巨型钟摆、记忆配对、空中之舞、章鱼转转杯、
+矿车、过山车、鬼屋、香蕉投掷、空气炮与沙袋拳击；`HTPukalandComponent` 这类组件不会被列进去。
+
+**迷宫** 页只列 `HTPukalandMazeWaypoint` 及其蓝图子类，可逐个传送，也可以打开 **自动巡点**
+按设定间隔依次传送。传送只挪动本机角色，不会替你点亮航点。
+
+**星票** 页只读调用 `UHTPukalandComponent::GetTicketBalance`：参数缓冲零填充，只读返回值，
+不做任何写入。余额记账在服务器上，这里显示的是本机玩家当前的实时数值。读不到时页面会逐条显示
+注册表、组件、函数三段的定位状态，便于判断是还没进乐园世界，还是游戏版本改了布局。
+
 ## 管理插件
 
 在 **Plugins** 页你可以：

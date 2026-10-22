@@ -1506,11 +1506,24 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         MANIFEST plugins/HiFiVehicleMusic/manifest.json
         PACKAGE_NAME HiFiVehicleMusic
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/HiFiVehicleMusic")
+    # 噗卡星票：花篱秘密园自动开局 / 满分结算循环（远程，不进场景）。
+    anomaly_add_plugin(anomaly_builtin_puka_paradise
+        SOURCES plugins/PukaParadise/plugin.cpp plugins/PukaParadise/reflection.cpp
+        MANIFEST plugins/PukaParadise/manifest.json
+        PACKAGE_NAME PukaParadise
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/PukaParadise")
     anomaly_add_plugin(anomaly_builtin_model_scale
         SOURCES plugins/ModelScale/plugin.cpp
         MANIFEST plugins/ModelScale/manifest.json
         PACKAGE_NAME ModelScale
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/ModelScale")
+    # 排球满星：走游戏自身的排球比赛接口把比赛结算成胜利并复核领先。
+    anomaly_add_plugin(anomaly_builtin_volleyball_win
+        SOURCES plugins/VolleyballWin/plugin.cpp plugins/VolleyballWin/ue_bridge.cpp
+        MANIFEST plugins/VolleyballWin/manifest.json
+        PACKAGE_NAME VolleyballWin
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/VolleyballWin")
+    target_link_libraries(anomaly_builtin_volleyball_win PRIVATE nlohmann_json::nlohmann_json)
     target_link_libraries(anomaly_builtin_hifi_vehicle_music PRIVATE
         nlohmann_json::nlohmann_json anomaly_miniaudio anomaly_rtaudio_asio anomaly_monkeys_audio anomaly_dsd2pcm
         ole32 shell32 uuid avrt winmm)
@@ -1530,7 +1543,8 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         anomaly_builtin_clone_enter anomaly_builtin_nte_quick_ultimate
         anomaly_builtin_nte_free_fly anomaly_builtin_skin_changer anomaly_builtin_ui_buttons
         anomaly_builtin_dll_loader anomaly_builtin_hifi_vehicle_music
-        anomaly_builtin_model_scale anomaly_builtin_autofish)
+        anomaly_builtin_model_scale anomaly_builtin_autofish
+        anomaly_builtin_puka_paradise anomaly_builtin_volleyball_win)
     if(ANOMALY_BUILD_TEST_PLUGINS)
         list(APPEND ANOMALY_BUILTIN_PLUGIN_TARGETS
             anomaly_builtin_nte_movement_hold
@@ -1553,6 +1567,8 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         target_compile_options(anomaly_builtin_autofish PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_ui_buttons PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_hifi_vehicle_music PRIVATE /utf-8)
+        target_compile_options(anomaly_builtin_puka_paradise PRIVATE /utf-8)
+        target_compile_options(anomaly_builtin_volleyball_win PRIVATE /utf-8)
     endif()
     add_dependencies(anomaly_test_host ${ANOMALY_BUILTIN_PLUGIN_TARGETS})
     if(TARGET anomaly-platform-preview)
@@ -1609,6 +1625,7 @@ anomaly_stage_platform_preview_plugin(anomaly_builtin_autofish AutoFish)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_ui_buttons UiButtons)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_dll_loader DllLoader)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_time_accel TimeAccel)
+anomaly_stage_platform_preview_plugin(anomaly_builtin_puka_paradise PukaParadise)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_hifi_vehicle_music HiFiVehicleMusic)
 
 if(TARGET anomaly-platform-preview)

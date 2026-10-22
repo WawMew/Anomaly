@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 2,
+  "id": "anomaly.local.nte.puka-paradise",
+  "name": "噗卡星票",
+  "description": "花篱秘密园自动满分结算。远程调用 UHTPukalandComponent 的 RequestStartMiniGame(Maze_01) 开局，按迷宫 runtime 自己的结果字段（分数/评级/达标/满级）构造满分结果后 SubmitMiniGameResult 结算，读 TicketBalance 确认到账后进入下一轮。全程不移动角色、不进入任何场景。",
+  "author": "WawMew",
+  "license": "AGPL-3.0-only",
+  "audience": "user",
+  "version": "0.2.0",
+  "entry": "plugin.dll",
+  "api": {"major": 1, "minMinor": 0, "maxMinor": 0},
+  "games": ["nte"],
+  "builds": ["nte-*"],
+  "loadPhase": "game-ready",
+  "services": [
+    {"id": "anomaly.core", "minVersion": 1},
+    {"id": "anomaly.ui", "minVersion": 1},
+    {"id": "anomaly.localization", "minVersion": 1},
+    {"id": "anomaly.interop.signature", "minVersion": 1, "optional": true},
+    {"id": "anomaly.interop.patch", "minVersion": 1, "optional": true},
+    {"id": "anomaly.ue5.names", "minVersion": 1, "optional": true},
+    {"id": "anomaly.nte.session", "minVersion": 1, "optional": true},
+    {"id": "anomaly.nte.player", "minVersion": 1, "optional": true},
+    {"id": "anomaly.nte.player-teleport", "minVersion": 1, "optional": true},
+    {"id": "anomaly.nte.actors", "minVersion": 1, "optional": true},
+    {"id": "anomaly.nte.ui-buttons", "minVersion": 1, "optional": true}
+  ],
+  "capabilities": [
+    "ui",
+    "memory-read",
+    "interop-signature",
+    "interop-patch",
+    "ue5-names",
+    "nte-session-snapshot",
+    "nte-player-snapshot",
+    "nte-player-teleport",
+    "nte-actor-snapshot",
+    "nte-ui-buttons"
+  ]
+}

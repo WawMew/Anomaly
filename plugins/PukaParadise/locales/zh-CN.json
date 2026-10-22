@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "messages": {
+    "plugin.name": "噗卡星票",
+    "plugin.description": "花篱秘密园自动满分结算：远程开局 → 满分结果 → 自动结算 → 下一轮。",
+    "window.title": "噗卡星票",
+    "setting.rounds": "轮次上限",
+    "setting.score": "上报分数",
+    "action.start": "开始自动",
+    "action.stop": "停止"
+  }
+}
