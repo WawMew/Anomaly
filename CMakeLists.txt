@@ -234,8 +234,47 @@ if(MSVC)
     target_compile_options(anomaly_monkeys_audio PRIVATE /w)
 endif()
 
+# Liquid glass shaders live in src/ui/shaders and are compiled at build time into
+# bytecode headers, so the renderer never compiles HLSL at run time.
+file(GLOB ANOMALY_GLASS_FXC_CANDIDATES
+    "$ENV{ProgramFiles\(x86\)}/Windows Kits/10/bin/*/x64/fxc.exe")
+list(SORT ANOMALY_GLASS_FXC_CANDIDATES COMPARE NATURAL ORDER DESCENDING)
+set(ANOMALY_GLASS_FXC_HINTS "")
+foreach(candidate IN LISTS ANOMALY_GLASS_FXC_CANDIDATES)
+    get_filename_component(candidate_directory "${candidate}" DIRECTORY)
+    list(APPEND ANOMALY_GLASS_FXC_HINTS "${candidate_directory}")
+endforeach()
+find_program(ANOMALY_GLASS_FXC fxc
+    HINTS
+        "${CMAKE_WINDOWS_KITS_10_DIR}/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
+        ${ANOMALY_GLASS_FXC_HINTS}
+    REQUIRED)
+set(ANOMALY_GLASS_SHADER_DIR "${GENERATED_DIR}/anomaly/shaders")
+file(MAKE_DIRECTORY "${ANOMALY_GLASS_SHADER_DIR}")
+set(ANOMALY_GLASS_SHADER_HEADERS "")
+function(anomaly_compile_glass_shader source entry profile variable)
+    set(output "${ANOMALY_GLASS_SHADER_DIR}/${variable}.h")
+    add_custom_command(
+        OUTPUT "${output}"
+        COMMAND "${ANOMALY_GLASS_FXC}" /nologo /O3 /Ges /T ${profile} /E ${entry}
+                /Vn ${variable} /Fh "${output}" "${CMAKE_SOURCE_DIR}/${source}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/${source}"
+        COMMENT "Compiling ${source} (${entry})"
+        VERBATIM)
+    set(ANOMALY_GLASS_SHADER_HEADERS ${ANOMALY_GLASS_SHADER_HEADERS} "${output}" PARENT_SCOPE)
+endfunction()
+anomaly_compile_glass_shader(src/ui/shaders/glass_pass.hlsl vs_full vs_4_0 kGlassFullScreenVs)
+anomaly_compile_glass_shader(src/ui/shaders/glass_pass.hlsl ps_down ps_4_0 kGlassDownsamplePs)
+anomaly_compile_glass_shader(src/ui/shaders/glass_pass.hlsl ps_blur ps_4_0 kGlassBlurPs)
+anomaly_compile_glass_shader(src/ui/shaders/glass_surface.hlsl vs_quad vs_4_0 kGlassSurfaceVs)
+anomaly_compile_glass_shader(src/ui/shaders/glass_surface.hlsl ps_glass ps_4_0 kGlassSurfacePs)
+
 add_library(anomaly_imgui STATIC
+    ${ANOMALY_GLASS_SHADER_HEADERS}
+    src/ui/shaders/glass_pass.hlsl
+    src/ui/shaders/glass_surface.hlsl
     src/ui/host_ui_service.cpp
+    src/ui/liquid_glass.cpp
     src/ui/platform_ui_theme.cpp
     "${imgui_SOURCE_DIR}/imgui.cpp"
     "${imgui_SOURCE_DIR}/imgui_draw.cpp"
@@ -245,10 +284,15 @@ add_library(anomaly_imgui STATIC
     "${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp"
     "${imgui_SOURCE_DIR}/backends/imgui_impl_dx12.cpp"
 )
-target_include_directories(anomaly_imgui PUBLIC "${imgui_SOURCE_DIR}" PRIVATE include)
+target_include_directories(anomaly_imgui PUBLIC "${imgui_SOURCE_DIR}"
+    PRIVATE include "${GENERATED_DIR}")
 target_compile_definitions(anomaly_imgui PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anomaly_imgui PRIVATE /W3 /EHsc)
 target_link_libraries(anomaly_imgui PUBLIC d3d11 d3d12 dxgi dxguid)
+# The .hlsl files are listed for the IDE only; fxc builds them above.
+set_source_files_properties(
+    src/ui/shaders/glass_pass.hlsl src/ui/shaders/glass_surface.hlsl
+    PROPERTIES HEADER_FILE_ONLY TRUE)
 
 add_executable(proxy_generator tools/proxy_generator.cpp)
 target_compile_definitions(proxy_generator PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -264,6 +308,25 @@ file(TO_CMAKE_PATH
     "${CMAKE_SOURCE_DIR}/apps/launcher/AnomalyLauncher.ico"
     ANOMALY_LAUNCHER_ICON_PATH)
 set(PLATFORM_UI_RESOURCES_RC "${GENERATED_DIR}/platform_ui_resources.rc")
+# The same artwork is compiled into the image's read-only data, because a core that is mapped without a
+# loader cannot read its own resource directory once its headers are hidden. Generating it here keeps one
+# source of truth: the PNGs above.
+file(READ "${ANOMALY_PLATFORM_LOGO_PATH}" ANOMALY_PLATFORM_LOGO_HEX HEX)
+file(READ "${ANOMALY_ESC_MENU_LOGO_PATH}" ANOMALY_ESC_MENU_LOGO_HEX HEX)
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1,"
+    ANOMALY_PLATFORM_LOGO_BYTES "${ANOMALY_PLATFORM_LOGO_HEX}")
+string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1,"
+    ANOMALY_ESC_MENU_LOGO_BYTES "${ANOMALY_ESC_MENU_LOGO_HEX}")
+string(LENGTH "${ANOMALY_PLATFORM_LOGO_HEX}" ANOMALY_PLATFORM_LOGO_HEX_LENGTH)
+string(LENGTH "${ANOMALY_ESC_MENU_LOGO_HEX}" ANOMALY_ESC_MENU_LOGO_HEX_LENGTH)
+math(EXPR ANOMALY_PLATFORM_LOGO_COUNT "${ANOMALY_PLATFORM_LOGO_HEX_LENGTH} / 2")
+math(EXPR ANOMALY_ESC_MENU_LOGO_COUNT "${ANOMALY_ESC_MENU_LOGO_HEX_LENGTH} / 2")
+file(MAKE_DIRECTORY "${GENERATED_DIR}/anomaly")
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/embedded_artwork.hpp.in"
+    "${GENERATED_DIR}/anomaly/embedded_artwork.hpp" @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${ANOMALY_PLATFORM_LOGO_PATH}" "${ANOMALY_ESC_MENU_LOGO_PATH}")
 set(LAUNCHER_RESOURCES_RC "${GENERATED_DIR}/AnomalyLauncher.rc")
 
 file(MAKE_DIRECTORY "${GENERATED_DIR}")
@@ -466,13 +529,23 @@ target_compile_options(anomaly_ue5_network_deserializer PRIVATE /W4 /permissive-
 target_link_libraries(anomaly_ue5_network_deserializer PUBLIC anomaly_ue5_bit_reader)
 target_link_libraries(anomaly_build_profile PUBLIC anomaly_ue5_network_deserializer)
 
+add_library(anomaly_signature_updater STATIC src/services/signature_updater.cpp)
+target_include_directories(anomaly_signature_updater PUBLIC include
+    PRIVATE "${minhook_SOURCE_DIR}/src/hde")
+target_compile_definitions(anomaly_signature_updater PUBLIC
+    UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(anomaly_signature_updater PRIVATE /W4 /permissive- /EHsc)
+target_link_libraries(anomaly_signature_updater PUBLIC ue5mem_memory
+    PRIVATE anomaly_reliable_storage minhook nlohmann_json::nlohmann_json)
+
 add_library(anomaly_symbol_resolver STATIC src/game/ue5/symbol_resolver.cpp)
 target_include_directories(anomaly_symbol_resolver PUBLIC include)
 target_compile_definitions(
     anomaly_symbol_resolver PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_compile_options(anomaly_symbol_resolver PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(
-    anomaly_symbol_resolver PUBLIC anomaly_build_profile anomaly_internal_memory_services)
+    anomaly_symbol_resolver PUBLIC anomaly_build_profile anomaly_internal_memory_services
+    anomaly_signature_updater)
 
 add_library(anomaly_ue5_ftext STATIC src/game/ue5/ue5_ftext.cpp)
 target_include_directories(anomaly_ue5_ftext PUBLIC include)
@@ -565,7 +638,9 @@ target_compile_definitions(
 target_compile_options(anomaly_runtime_dispatchers PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(anomaly_runtime_dispatchers PUBLIC anomaly_dispatcher)
 
-add_library(anomaly_structured_logger STATIC src/services/structured_logger.cpp)
+add_library(anomaly_structured_logger STATIC
+    src/services/log_retention.cpp
+    src/services/structured_logger.cpp)
 target_include_directories(anomaly_structured_logger PUBLIC include)
 target_compile_definitions(
     anomaly_structured_logger PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -637,7 +712,9 @@ target_link_libraries(anomaly_launcher_configuration
 
 add_library(anomaly_manual_map STATIC
     src/launcher/manual_map.cpp
-    src/launcher/manual_map_remote.asm)
+    src/launcher/manual_map_remote.asm
+    src/launcher/manual_map_hijack.asm
+    src/launcher/manual_map_load_library.asm)
 target_include_directories(anomaly_manual_map PUBLIC include)
 target_compile_definitions(
     anomaly_manual_map PUBLIC UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
@@ -892,6 +969,7 @@ target_compile_options(anomaly_scoped_platform PRIVATE /W4 /permissive- /EHsc)
 target_link_libraries(
     anomaly_scoped_platform
     PUBLIC anomaly_internal_memory_services anomaly_reliable_storage anomaly_minhook_backend
+    anomaly_signature_updater
     PRIVATE nlohmann_json::nlohmann_json nlohmann_json_schema_validator::validator)
 
 add_library(anomaly_service_graph STATIC src/runtime/service_graph.cpp)
@@ -915,6 +993,7 @@ add_custom_target(anomaly_stage_nte_profiles ALL
 
 add_library(anomaly_core SHARED
     src/runtime/core_main.cpp
+    src/hook/ace_unhook.cpp
     src/runtime/manual_map_exception.cpp
     src/ui/platform_host.cpp
     "${PLATFORM_UI_RESOURCES_RC}"
@@ -1044,6 +1123,15 @@ set_target_properties(anomaly_abi_snapshot PROPERTIES OUTPUT_NAME "anomaly-abi-s
 target_link_libraries(anomaly_abi_snapshot PRIVATE Anomaly::sdk)
 target_compile_options(anomaly_abi_snapshot PRIVATE /W4 /permissive- /EHsc)
 
+# Attaches the runtime core to a game that is already running. It shares the mapper the launcher uses,
+# so the attach it performs is the same one the launcher's live-attach mode performs.
+add_executable(anomaly_injector apps/injector/main.cpp)
+set_target_properties(anomaly_injector PROPERTIES OUTPUT_NAME "anomaly-inject")
+target_include_directories(anomaly_injector PRIVATE include)
+target_compile_definitions(anomaly_injector PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(anomaly_injector PRIVATE /W4 /permissive- /EHsc)
+target_link_libraries(anomaly_injector PRIVATE anomaly_manual_map)
+
 add_executable(anomaly_test_host apps/test_host/main.cpp src/plugin/plugin_manager.cpp)
 set_target_properties(anomaly_test_host PROPERTIES OUTPUT_NAME "anomaly-test-host")
 target_include_directories(anomaly_test_host PRIVATE include)
@@ -1056,14 +1144,22 @@ target_link_libraries(anomaly_test_host PRIVATE
     anomaly_i18n nlohmann_json::nlohmann_json Psapi)
 
 if(ANOMALY_BUILD_TEST_FIXTURES)
-    add_executable(anomaly-platform-preview WIN32
-        apps/render_fixture/platform_preview.cpp
+    enable_testing()
+    add_executable(anomaly_d3d12_interop_fixture
+        apps/render_fixture/d3d12_interop_fixture.cpp)
+    target_include_directories(anomaly_d3d12_interop_fixture PRIVATE include src)
+    target_compile_definitions(anomaly_d3d12_interop_fixture PRIVATE
+        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_options(anomaly_d3d12_interop_fixture PRIVATE /W4 /permissive- /EHsc)
+    target_link_libraries(anomaly_d3d12_interop_fixture PRIVATE d3d12 dxgi user32)
+    add_test(NAME d3d12_interop COMMAND anomaly_d3d12_interop_fixture)
+    add_executable(anomaly-platform-preview WIN32        apps/platform_preview/main.cpp
         src/ui/platform_host.cpp
         "${PLATFORM_UI_RESOURCES_RC}"
         src/plugin/plugin_manager.cpp)
     set_target_properties(anomaly-platform-preview PROPERTIES
         OUTPUT_NAME "anomaly-platform-preview")
-    target_include_directories(anomaly-platform-preview PRIVATE include src)
+    target_include_directories(anomaly-platform-preview PRIVATE include src "${GENERATED_DIR}" "")
     target_compile_definitions(anomaly-platform-preview PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(anomaly-platform-preview PRIVATE /W4 /permissive- /EHsc)
     target_link_libraries(
@@ -1096,70 +1192,6 @@ target_link_libraries(anomaly_launcher PRIVATE
 # The hook is part of the runtime payload the launcher is installed with, so it is built before the
 # launcher that would inject it.
 add_dependencies(anomaly_launcher dwmapi anomaly_core anomaly_nte_game_hook)
-
-if(ANOMALY_BUILD_TEST_FIXTURES)
-    add_executable(anomaly_render_fixture apps/render_fixture/main.cpp)
-    set_target_properties(anomaly_render_fixture PROPERTIES OUTPUT_NAME "anomaly-render-fixture")
-    target_compile_definitions(
-        anomaly_render_fixture PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(anomaly_render_fixture PRIVATE /W4 /permissive- /EHsc)
-    target_link_libraries(
-        anomaly_render_fixture PRIVATE anomaly_runtime_kernel d3d12 dxgi dxguid)
-endif()
-
-# Drives the Host UI button engine (anomaly.nte.ui-buttons) against an in-memory widget
-# tree laid out from the SDK dump, with offsets read from the shipped NTE Profile.
-if(ANOMALY_BUILD_TEST_FIXTURES)
-    add_executable(anomaly_nte_ui_buttons_fixture apps/nte_ui_buttons_fixture/main.cpp)
-    target_compile_definitions(anomaly_nte_ui_buttons_fixture PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-        "ANOMALY_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
-    target_compile_options(anomaly_nte_ui_buttons_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
-    target_link_libraries(anomaly_nte_ui_buttons_fixture PRIVATE
-        anomaly_adapter_services anomaly_build_profile)
-endif()
-
-# Exercises the Present interception path against a D3D11 swap chain, which is
-# what a title using the D3D11 RHI presents. Nothing covered that path before,
-# which is how an overlay that only knew how to draw with D3D12 could sit in a
-# D3D11 game reporting nothing but "waiting for a command queue". The fixture
-# owns the window, device and swap chain; everything above it is the real
-# embedded platform, hooks included.
-if(ANOMALY_BUILD_TEST_FIXTURES)
-    add_executable(anomaly_d3d11_fixture
-        apps/render_fixture/d3d11_embedded_fixture.cpp
-        src/ui/platform_host.cpp
-        "${PLATFORM_UI_RESOURCES_RC}"
-        src/render/dx12/embedded_bridge.cpp
-        src/render/dx12/embedded_discovery.cpp
-        src/render/dx12/embedded_input.cpp
-        src/render/dx12/embedded_renderer.cpp
-        src/render/dx12/embedded_ui_resource_render_backend.cpp
-        src/ui/embedded_ui.cpp
-        src/game/nte/nte_esc_menu_bridge.cpp
-        src/plugin/plugin_manager.cpp)
-    set_target_properties(anomaly_d3d11_fixture PROPERTIES OUTPUT_NAME "anomaly-d3d11-fixture")
-    target_include_directories(anomaly_d3d11_fixture PRIVATE include src "${GENERATED_DIR}")
-    target_compile_definitions(
-        anomaly_d3d11_fixture PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_compile_options(anomaly_d3d11_fixture PRIVATE /W4 /permissive- /EHsc)
-    target_link_libraries(
-        anomaly_d3d11_fixture PRIVATE
-        ue5mem_core anomaly_runtime_kernel anomaly_imgui anomaly_minhook_backend anomaly_ui_service
-        anomaly_platform_ui_model
-        anomaly_platform_settings
-        anomaly_platform_ui_layout
-        anomaly_scoped_platform
-        anomaly_plugin_shadow anomaly_plugin_dependency_resolver anomaly_plugin_enablement
-        anomaly_nte_profile_runtime
-        anomaly_websocket_server
-        anomaly_repository_coordinator
-        anomaly_crash_reporter anomaly_runtime_crash_coordinator
-        anomaly_structured_logger anomaly_ui_resources anomaly_i18n
-        anomaly_adapter_services anomaly_plugin_runtime
-        nlohmann_json::nlohmann_json d3d11 d3d12 dxgi dxguid)
-    add_dependencies(anomaly_d3d11_fixture anomaly_stage_nte_profiles)
-endif()
 
 option(ANOMALY_BUILD_SDK_EXAMPLES "Build the Anomaly 1.0 SDK example plugins" ON)
 option(ANOMALY_BUILD_BUILTIN_PLUGINS "Build Anomaly bundled plugins" ON)
@@ -1356,6 +1388,18 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         add_executable(anomaly_better_pose_pose_document_fixture
             plugins/BetterPose/tests/pose_document_test.cpp)
         target_compile_options(anomaly_better_pose_pose_document_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
+        add_executable(anomaly_better_pose_edit_history_fixture
+            plugins/BetterPose/tests/edit_history_test.cpp)
+        target_compile_options(anomaly_better_pose_edit_history_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
+        add_executable(anomaly_better_pose_keyframe_fixture
+            plugins/BetterPose/tests/keyframe_track_test.cpp)
+        target_compile_options(anomaly_better_pose_keyframe_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
+        add_executable(anomaly_better_pose_gizmo_fixture
+            plugins/BetterPose/tests/rotation_gizmo_test.cpp)
+        target_compile_options(anomaly_better_pose_gizmo_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
+        add_executable(anomaly_better_pose_timeline_fixture
+            plugins/BetterPose/tests/timeline_overlay_test.cpp)
+        target_compile_options(anomaly_better_pose_timeline_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
         add_executable(anomaly_better_pose_limits_fixture
             plugins/BetterPose/tests/joint_limits_test.cpp)
         target_compile_options(anomaly_better_pose_limits_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
@@ -1374,6 +1418,50 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         target_include_directories(anomaly_better_pose_joint_drag_fixture PRIVATE include)
         target_link_libraries(anomaly_better_pose_joint_drag_fixture PRIVATE
             anomaly_mmd2bip_converter winmm user32 ole32 shell32 uuid comdlg32 advapi32 shlwapi)
+        add_executable(anomaly_better_pose_mmd_interpolation_fixture
+            plugins/BetterPose/tests/mmd_interpolation_test.cpp)
+        target_compile_options(anomaly_better_pose_mmd_interpolation_fixture PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+        target_link_libraries(anomaly_better_pose_mmd_interpolation_fixture PRIVATE
+            anomaly_mmd2bip_converter)
+        add_executable(anomaly_better_pose_standard_bone_fixture
+            plugins/BetterPose/tests/standard_bone_retarget_test.cpp)
+        target_compile_options(anomaly_better_pose_standard_bone_fixture PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+        target_link_libraries(anomaly_better_pose_standard_bone_fixture PRIVATE
+            anomaly_mmd2bip_converter)
+        add_executable(anomaly_better_pose_motion_amplitude_fixture
+            plugins/BetterPose/tests/motion_amplitude_test.cpp)
+        target_compile_options(anomaly_better_pose_motion_amplitude_fixture PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+        add_executable(anomaly_better_pose_motion_joint_fixture
+            plugins/BetterPose/tests/motion_joint_calibration_test.cpp)
+        target_compile_options(anomaly_better_pose_motion_joint_fixture PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+        add_executable(anomaly_better_pose_motion_travel_fixture
+            plugins/BetterPose/tests/motion_travel_test.cpp)
+        target_compile_options(anomaly_better_pose_motion_travel_fixture PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+        add_executable(anomaly_better_pose_endfield_reference_fixture
+            plugins/BetterPose/tests/endfield_standard_reference_test.cpp)
+        target_compile_options(anomaly_better_pose_endfield_reference_fixture PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+        target_link_libraries(anomaly_better_pose_endfield_reference_fixture PRIVATE
+            nlohmann_json::nlohmann_json)
+        add_executable(anomaly_better_pose_limb_calibration_fixture
+            plugins/BetterPose/tests/limb_calibration_test.cpp)
+        target_compile_options(anomaly_better_pose_limb_calibration_fixture PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+        target_include_directories(anomaly_better_pose_limb_calibration_fixture PRIVATE include)
+        target_link_libraries(anomaly_better_pose_limb_calibration_fixture PRIVATE
+            anomaly_mmd2bip_converter winmm user32 ole32 shell32 uuid comdlg32 advapi32 shlwapi)
+        add_executable(anomaly_better_pose_t_pose_calibration_fixture
+            plugins/BetterPose/tests/t_pose_calibration_test.cpp)
+        target_compile_options(anomaly_better_pose_t_pose_calibration_fixture PRIVATE
+            /W4 /permissive- /EHsc /utf-8)
+        target_include_directories(anomaly_better_pose_t_pose_calibration_fixture PRIVATE include)
+        target_link_libraries(anomaly_better_pose_t_pose_calibration_fixture PRIVATE
+            anomaly_mmd2bip_converter winmm user32 ole32 shell32 uuid comdlg32 advapi32 shlwapi)
     endif()
     # The in-game conversion needs the reference MMD bone table next to the plugin.
     add_custom_command(TARGET anomaly_builtin_better_pose POST_BUILD
@@ -1383,7 +1471,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         VERBATIM)
     add_executable(anomaly_mmd2bip apps/mmd2bip/main.cpp)
     set_target_properties(anomaly_mmd2bip PROPERTIES OUTPUT_NAME "anomaly-mmd2bip")
-    target_compile_options(anomaly_mmd2bip PRIVATE /W4 /permissive- /EHsc)
+    target_compile_options(anomaly_mmd2bip PRIVATE /W4 /permissive- /EHsc /utf-8)
     target_link_libraries(anomaly_mmd2bip PRIVATE anomaly_mmd2bip_converter)
     anomaly_add_plugin(anomaly_builtin_teleport_landmarks_probe TEST_PLUGIN
         SOURCES plugins/TeleportLandmarksProbe/plugin.cpp
@@ -1605,7 +1693,8 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         anomaly_builtin_fake_uid anomaly_builtin_camera_tools
         anomaly_builtin_camera_blur_fix anomaly_builtin_better_pose
         anomaly_builtin_wallet_collector anomaly_builtin_box_auto anomaly_builtin_combat_box
-        anomaly_builtin_clone_enter anomaly_builtin_nte_quick_ultimate
+        anomaly_builtin_clone_enter anomaly_builtin_damage_dashboard
+        anomaly_builtin_nte_quick_ultimate
         anomaly_builtin_nte_free_fly anomaly_builtin_skin_changer anomaly_builtin_ui_buttons
         anomaly_builtin_dll_loader anomaly_builtin_hifi_vehicle_music
         anomaly_builtin_model_scale anomaly_builtin_autofish
@@ -1628,6 +1717,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         target_compile_options(anomaly_builtin_box_auto PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_combat_box PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_clone_enter PRIVATE /utf-8)
+        target_compile_options(anomaly_builtin_damage_dashboard PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_nte_free_fly PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_skin_changer PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_autofish PRIVATE /utf-8)
@@ -1686,6 +1776,8 @@ anomaly_stage_platform_preview_plugin(anomaly_builtin_box_auto BoxAuto)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_combat_box CombatBox)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_clone_enter CloneEnter)
 anomaly_stage_platform_preview_plugin(
+    anomaly_builtin_damage_dashboard DamageDashboard)
+anomaly_stage_platform_preview_plugin(
     anomaly_builtin_nte_quick_ultimate QuickUltimate)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_nte_free_fly NteFreeFly)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_skin_changer SkinChanger)
@@ -1708,124 +1800,10 @@ if(TARGET anomaly-platform-preview)
         VERBATIM)
 endif()
 
-# Diagnostic probe packages: bounded transport traces and the exact-build BidKing
-# probes. They are read-only research packages that ship in no release component,
-# so they are opt-in (`build.cmd probes`) instead of part of the default build.
-option(ANOMALY_BUILD_DIAGNOSTIC_PROBES
-    "Build the opt-in diagnostic probe plugin packages" OFF)
-if(ANOMALY_BUILD_DIAGNOSTIC_PROBES)
-    function(anomaly_add_winsock_trace_probe target operation plugin_id package_name)
-        anomaly_add_plugin(${target} NO_RELEASE
-            SOURCES tools/winsock_trace_probe/plugin.cpp
-            MANIFEST tools/winsock_trace_probe/manifests/${package_name}.json
-            PACKAGE_NAME ${package_name}
-            OUTPUT_DIRECTORY
-                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/winsock-trace-probes/${package_name}")
-        target_compile_definitions(${target} PRIVATE
-            UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
-            "ANOMALY_WINSOCK_TRACE_OPERATION=${operation}"
-            "ANOMALY_WINSOCK_TRACE_PLUGIN_ID=\"${plugin_id}\"")
-        target_link_libraries(${target} PRIVATE Ws2_32 Iphlpapi Bcrypt)
-    endfunction()
-
-    anomaly_add_winsock_trace_probe(
-        anomaly_winsock_trace_send 1 anomaly.diagnostics.winsock.send WinsockSend)
-    anomaly_add_winsock_trace_probe(
-        anomaly_winsock_trace_sendto 2 anomaly.diagnostics.winsock.sendto WinsockSendTo)
-    anomaly_add_winsock_trace_probe(
-        anomaly_winsock_trace_wsasend 3 anomaly.diagnostics.winsock.wsasend WinsockWsaSend)
-    anomaly_add_winsock_trace_probe(
-        anomaly_winsock_trace_wsasendto 4 anomaly.diagnostics.winsock.wsasendto WinsockWsaSendTo)
-    anomaly_add_winsock_trace_probe(
-        anomaly_winsock_trace_recv 5 anomaly.diagnostics.winsock.recv WinsockRecv)
-    anomaly_add_winsock_trace_probe(
-        anomaly_winsock_trace_recvfrom 6 anomaly.diagnostics.winsock.recvfrom WinsockRecvFrom)
-    anomaly_add_winsock_trace_probe(
-        anomaly_winsock_trace_wsarecv 7 anomaly.diagnostics.winsock.wsarecv WinsockWsaRecv)
-    anomaly_add_winsock_trace_probe(
-        anomaly_winsock_trace_wsarecvfrom 8 anomaly.diagnostics.winsock.wsarecvfrom WinsockWsaRecvFrom)
-
-    set(ANOMALY_WINSOCK_TRACE_PROBE_TARGETS
-        anomaly_winsock_trace_send
-        anomaly_winsock_trace_sendto
-        anomaly_winsock_trace_wsasend
-        anomaly_winsock_trace_wsasendto
-        anomaly_winsock_trace_recv
-        anomaly_winsock_trace_recvfrom
-        anomaly_winsock_trace_wsarecv
-        anomaly_winsock_trace_wsarecvfrom)
-    add_dependencies(anomaly_test_host ${ANOMALY_WINSOCK_TRACE_PROBE_TARGETS})
-
-    anomaly_add_plugin(anomaly_netproto_pipeline_trace NO_RELEASE
-        SOURCES tools/netproto_probe/plugin.cpp
-        MANIFEST tools/netproto_probe/manifests/NetProtoPipelineTrace.json
-        PACKAGE_NAME NetProtoPipelineTrace
-        OUTPUT_DIRECTORY
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/winsock-trace-probes/NetProtoPipelineTrace")
-    target_compile_definitions(anomaly_netproto_pipeline_trace PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_link_libraries(anomaly_netproto_pipeline_trace PRIVATE Bcrypt)
-    add_dependencies(anomaly_test_host anomaly_netproto_pipeline_trace)
-
-    anomaly_add_plugin(anomaly_secur32_tls_trace NO_RELEASE
-        SOURCES tools/tls_trace_probe/plugin.cpp
-        MANIFEST tools/tls_trace_probe/manifests/Secur32TlsTrace.json
-        PACKAGE_NAME Secur32TlsTrace
-        OUTPUT_DIRECTORY
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/winsock-trace-probes/Secur32TlsTrace")
-    target_compile_definitions(anomaly_secur32_tls_trace PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX SECURITY_WIN32)
-    target_link_libraries(anomaly_secur32_tls_trace PRIVATE Bcrypt)
-    add_dependencies(anomaly_test_host anomaly_secur32_tls_trace)
-
-    anomaly_add_plugin(anomaly_winhttp_trace NO_RELEASE
-        SOURCES tools/http_trace_probe/plugin.cpp
-        MANIFEST tools/http_trace_probe/manifests/WinHttpTrace.json
-        PACKAGE_NAME WinHttpTrace
-        OUTPUT_DIRECTORY
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/winsock-trace-probes/WinHttpTrace")
-    target_compile_definitions(anomaly_winhttp_trace PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_link_libraries(anomaly_winhttp_trace PRIVATE Bcrypt Winhttp)
-    add_dependencies(anomaly_test_host anomaly_winhttp_trace)
-
-    anomaly_add_plugin(anomaly_bcrypt_trace NO_RELEASE
-        SOURCES tools/bcrypt_trace_probe/plugin.cpp
-        MANIFEST tools/bcrypt_trace_probe/manifests/BcryptTrace.json
-        PACKAGE_NAME BcryptTrace
-        OUTPUT_DIRECTORY
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/winsock-trace-probes/BcryptTrace")
-    target_compile_definitions(anomaly_bcrypt_trace PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    target_link_libraries(anomaly_bcrypt_trace PRIVATE Bcrypt)
-    add_dependencies(anomaly_test_host anomaly_bcrypt_trace)
-endif()
-
-if(ANOMALY_BUILD_DIAGNOSTIC_PROBES)
-    anomaly_add_plugin(anomaly_bidking_object_catalog NO_RELEASE
-        SOURCES tools/bidking_object_catalog/plugin.cpp
-        MANIFEST tools/bidking_object_catalog/manifest.json
-        PACKAGE_NAME BidKingObjectCatalog
-        OUTPUT_DIRECTORY
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/bidking-object-catalog/BidKingObjectCatalog")
-    target_compile_definitions(anomaly_bidking_object_catalog PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    add_dependencies(anomaly_test_host anomaly_bidking_object_catalog)
-
-    anomaly_add_plugin(anomaly_bidking_round_pool_probe NO_RELEASE
-        SOURCES tools/bidking_round_pool_probe/plugin.cpp
-        MANIFEST tools/bidking_round_pool_probe/manifest.json
-        PACKAGE_NAME BidKingRoundPoolProbe
-        OUTPUT_DIRECTORY
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/bidking-round-pool-probe/BidKingRoundPoolProbe")
-    target_compile_definitions(anomaly_bidking_round_pool_probe PRIVATE
-        UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-    add_dependencies(anomaly_test_host anomaly_bidking_round_pool_probe)
-endif()
 set(ANOMALY_RELEASE_PE_TARGETS
     dwmapi anomaly_core anomaly_launcher anomaly_crash_coordinator anomaly_nte_game_hook
     anomaly-plugin anomaly_abi_snapshot anomaly_test_host
-    anomaly-profile anomaly_cli anomaly_inspect)
+    anomaly-profile anomaly_cli anomaly_inspect anomaly_injector)
 get_property(ANOMALY_RELEASE_PLUGIN_TARGETS GLOBAL PROPERTY ANOMALY_RELEASE_PLUGIN_TARGETS)
 list(REMOVE_DUPLICATES ANOMALY_RELEASE_PLUGIN_TARGETS)
 foreach(runtime_plugin_target IN LISTS ANOMALY_RELEASE_PLUGIN_TARGETS)
@@ -1890,6 +1868,7 @@ install(CODE [[
 install(DIRECTORY profiles/
     DESTINATION Anomaly/profiles COMPONENT GameRuntime)
 install(TARGETS anomaly_cli anomaly_inspect anomaly-profile anomaly-plugin anomaly_abi_snapshot anomaly_test_host
+    anomaly_injector
     RUNTIME DESTINATION . COMPONENT Tools)
 # The layout editor is one offline HTML file: it needs no runtime, no network and
 # no build step, so it ships as data next to the command line tools.

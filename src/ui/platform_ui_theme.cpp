@@ -1,5 +1,7 @@
 #include "anomaly/platform_ui_theme.hpp"
 
+#include "anomaly/liquid_glass.hpp"
+
 #include <imgui.h>
 
 #include "platform_ui_gb2312.hpp"
@@ -12,9 +14,6 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
-#include <map>
-#include <memory>
-#include <mutex>
 #include <string_view>
 #include <vector>
 #include <atomic>
@@ -244,48 +243,50 @@ void RefreshSurfaceTheme() noexcept {
 }
 
 constexpr float kPlatformFontSizePixels = 13.0f;
+// The host's bake ladder. In-game windows draw plugin text and localized documents at
+// whatever interface scale the user picked, so the host bakes every size it can select
+// and this set is not a memory knob for it. A surface with a fixed type scale passes
+// its own PlatformUiFontBake instead (the launcher bakes one size), which is where the
+// launcher's font memory was spent: each baked size keeps its own copy of the CJK
+// source file and its own slice of the atlas.
 constexpr std::array kPlatformFontBakeScales{
     1.00f, 1.25f, 1.50f, 1.75f, 2.00f};
 constexpr std::string_view kPlatformFontNamePrefix{"Anomaly host "};
 
-const std::vector<unsigned char>* CachedFontBytes(
-    const std::filesystem::path& path) noexcept {
+// The sizes actually baked by the last ConfigurePlatformUiFontAtlas call: a surface
+// that bakes one size must still be able to select it by name.
+std::vector<float> g_platform_font_bake_scales{
+    kPlatformFontBakeScales.begin(), kPlatformFontBakeScales.end()};
+
+std::vector<unsigned char> LoadFontBytes(const std::filesystem::path& path) noexcept {
     try {
-        static std::mutex mutex;
-        static std::map<std::filesystem::path,
-            std::unique_ptr<std::vector<unsigned char>>> cache;
-        std::scoped_lock lock(mutex);
-        if (const auto found = cache.find(path); found != cache.end()) {
-            return found->second.get();
-        }
         std::ifstream input(path, std::ios::binary);
-        if (!input) return nullptr;
-        auto bytes = std::make_unique<std::vector<unsigned char>>(
-            std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-        if (bytes->empty() ||
-            bytes->size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
-            return nullptr;
+        if (!input) return {};
+        const std::istreambuf_iterator<char> first(input);
+        const std::istreambuf_iterator<char> last;
+        std::vector<unsigned char> bytes(first, last);
+        if (bytes.empty() ||
+            bytes.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) {
+            return {};
         }
-        const auto* result = bytes.get();
-        cache.emplace(path, std::move(bytes));
-        return result;
+        return bytes;
     } catch (...) {
-        return nullptr;
+        return {};
     }
 }
 
-ImFont* AddCachedFontFromPath(
+// ImGui copies any source it does not own into an atlas-owned block, so the bytes
+// on the caller's side are only borrowed for the duration of the call.
+ImFont* AddBorrowedFontFromMemory(
     ImFontAtlas& atlas,
-    const std::filesystem::path& path,
+    const std::vector<unsigned char>& bytes,
     const float size_pixels,
     ImFontConfig configuration,
     const ImWchar* glyph_ranges) noexcept {
     try {
-        const auto* bytes = CachedFontBytes(path);
-        if (bytes == nullptr) return nullptr;
         configuration.FontDataOwnedByAtlas = false;
-        return atlas.AddFontFromMemoryTTF(const_cast<unsigned char*>(bytes->data()),
-            static_cast<int>(bytes->size()), size_pixels, &configuration, glyph_ranges);
+        return atlas.AddFontFromMemoryTTF(const_cast<unsigned char*>(bytes.data()),
+            static_cast<int>(bytes.size()), size_pixels, &configuration, glyph_ranges);
     } catch (...) {
         return nullptr;
     }
@@ -320,6 +321,29 @@ const ImWchar* PlatformChineseGlyphRanges(ImFontAtlas& atlas) noexcept {
         }
         builder.BuildRanges(&ranges);
     }
+    return ranges.Data;
+}
+
+// ImGui reads a source's glyph ranges when it builds the atlas, not when the font is
+// added, so the list has to outlive this call. Only the next configure replaces it, and
+// that clears the atlas sources pointing at it first.
+const ImWchar* PlatformIconGlyphRanges(const std::span<const char32_t> icons) noexcept {
+    static constexpr ImWchar kFullRange[] = {0xE700, 0xF8FF, 0};
+    if (icons.empty()) return kFullRange;
+    static ImVector<ImWchar> ranges;
+    std::vector<ImWchar> glyphs;
+    glyphs.reserve(icons.size());
+    for (const char32_t glyph : icons) {
+        if (glyph > 0 && glyph <= 0xFFFF) glyphs.push_back(static_cast<ImWchar>(glyph));
+    }
+    std::sort(glyphs.begin(), glyphs.end());
+    glyphs.erase(std::unique(glyphs.begin(), glyphs.end()), glyphs.end());
+    ranges.clear();
+    for (const ImWchar glyph : glyphs) {
+        ranges.push_back(glyph);
+        ranges.push_back(glyph);
+    }
+    ranges.push_back(0);
     return ranges.Data;
 }
 
@@ -404,78 +428,128 @@ void ApplyPlatformUiStyle() noexcept {
         ? ImGui::GetIO().FontGlobalScale
         : 1.0f;
     const PlatformUiThemeColors& theme = PlatformUiTheme();
-    style.WindowRounding = 4.0f;
-    style.ChildRounding = 0.0f;
-    style.FrameRounding = 3.0f;
-    // FrameBg matches ChildBg, so without a frame border an unchecked checkbox
-    // (and other empty frames) is indistinguishable from its surroundings.
-    style.FrameBorderSize = 1.0f;
-    // Keep native tab controls legible against the plugin body background.
-    style.TabBorderSize = 1.0f;
+    // Liquid glass geometry: continuous, generous corners. Panels draw their
+    // own material, so ImGui's child and frame borders are off and every frame
+    // is a soft neutral fill derived from the text colour instead. That keeps a
+    // field legible on any palette and on any glass tint without a hard outline.
+    const bool glass = anomaly::glass::Active();
+    style.WindowRounding = 18.0f;
+    style.ChildRounding = 14.0f;
+    style.FrameRounding = 9.0f;
+    style.PopupRounding = 14.0f;
+    style.ScrollbarRounding = 9.0f;
+    style.GrabRounding = 9.0f;
+    style.TabRounding = 9.0f;
+    style.WindowBorderSize = glass ? 0.0f : 1.0f;
+    style.PopupBorderSize = glass ? 0.0f : 1.0f;
+    style.ChildBorderSize = 0.0f;
+    style.FrameBorderSize = 0.0f;
+    style.TabBorderSize = 0.0f;
     style.TabBarBorderSize = 1.0f;
-    style.PopupRounding = 4.0f;
-    style.ScrollbarRounding = 3.0f;
-    style.WindowPadding = ImVec2(12.0f, 12.0f);
-    style.FramePadding = ImVec2(8.0f, 6.0f);
-    style.ItemSpacing = ImVec2(8.0f, 6.0f);
-    style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
+    style.TabBarOverlineSize = 0.0f;
+    style.SeparatorTextBorderSize = 1.0f;
+    style.WindowPadding = ImVec2(14.0f, 14.0f);
+    style.FramePadding = ImVec2(10.0f, 6.0f);
+    style.ItemSpacing = ImVec2(8.0f, 7.0f);
+    style.ItemInnerSpacing = ImVec2(8.0f, 5.0f);
+    style.CellPadding = ImVec2(8.0f, 5.0f);
     style.IndentSpacing = 16.0f;
-    style.ScrollbarSize = 12.0f;
-    style.GrabMinSize = 10.0f;
+    style.ScrollbarSize = 10.0f;
+    style.GrabMinSize = 12.0f;
+    style.SelectableTextAlign = ImVec2(0.0f, 0.5f);
+    const auto ink = [&theme](const float alpha) {
+        return ImVec4(theme.text.red, theme.text.green, theme.text.blue, alpha);
+    };
+    const auto accent = [&theme](const float alpha) {
+        return ImVec4(theme.accent.red, theme.accent.green, theme.accent.blue, alpha);
+    };
     auto* colors = style.Colors;
     colors[ImGuiCol_Text] = ImGuiColor(theme.text);
     colors[ImGuiCol_TextDisabled] = ImGuiColor(theme.text_muted);
     colors[ImGuiCol_WindowBg] = ImGuiColor(theme.window_background);
     colors[ImGuiCol_ChildBg] = ImGuiColor(theme.child_background);
-    colors[ImGuiCol_PopupBg] = ImGuiColor(theme.popup_background);
-    colors[ImGuiCol_Border] = ImGuiColor(theme.border);
-    colors[ImGuiCol_FrameBg] = ImGuiColor(theme.frame);
-    colors[ImGuiCol_FrameBgHovered] = ImGuiColor(theme.frame_hovered);
-    colors[ImGuiCol_FrameBgActive] = ImGuiColor(theme.frame_active);
+    // Popups, menus and tooltips receive a glass body from the renderer, so
+    // their own fill must stay out of its way.
+    colors[ImGuiCol_PopupBg] = glass
+        ? ImVec4(theme.popup_background.red, theme.popup_background.green,
+              theme.popup_background.blue, 0.0f)
+        : ImGuiColor(theme.popup_background);
+    colors[ImGuiCol_Border] = ink(0.12f);
+    colors[ImGuiCol_BorderShadow] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    colors[ImGuiCol_FrameBg] = ink(0.075f);
+    colors[ImGuiCol_FrameBgHovered] = ink(0.075f);
+    colors[ImGuiCol_FrameBgActive] = ink(0.15f);
     colors[ImGuiCol_TitleBg] = ImGuiColor(theme.navigation_background);
     colors[ImGuiCol_TitleBgActive] = ImGuiColor(theme.window_background);
-    colors[ImGuiCol_Button] = ImGuiColor(theme.button);
-    colors[ImGuiCol_ButtonHovered] = ImGuiColor(theme.button_hovered);
-    colors[ImGuiCol_ButtonActive] = ImGuiColor(theme.button_active);
-    colors[ImGuiCol_Header] = ImGuiColor(theme.accent_soft);
-    colors[ImGuiCol_HeaderHovered] = ImVec4(
-        theme.accent.red, theme.accent.green, theme.accent.blue, 0.24f);
-    colors[ImGuiCol_HeaderActive] = ImVec4(
-        theme.accent.red, theme.accent.green, theme.accent.blue, 0.32f);
+    colors[ImGuiCol_TitleBgCollapsed] = ImGuiColor(theme.navigation_background);
+    colors[ImGuiCol_MenuBarBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    colors[ImGuiCol_Button] = ink(0.085f);
+    colors[ImGuiCol_ButtonHovered] = ink(0.085f);
+    colors[ImGuiCol_ButtonActive] = ink(0.18f);
+    colors[ImGuiCol_Header] = accent(0.20f);
+    // Hover never changes a background: on glass any fill under the pointer
+    // reads as a shadow. Controls signal hover through their label instead.
+    colors[ImGuiCol_HeaderHovered] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    colors[ImGuiCol_HeaderActive] = accent(0.30f);
     colors[ImGuiCol_CheckMark] = ImGuiColor(theme.accent);
     colors[ImGuiCol_SliderGrab] = ImGuiColor(theme.accent);
-    colors[ImGuiCol_SliderGrabActive] = ImGuiColor(theme.accent_hovered);
-    colors[ImGuiCol_Separator] = colors[ImGuiCol_Border];
-    colors[ImGuiCol_ScrollbarBg] = ImGuiColor(theme.navigation_background);
-    colors[ImGuiCol_ScrollbarGrab] = ImGuiColor(theme.border);
-    colors[ImGuiCol_ScrollbarGrabHovered] = ImGuiColor(theme.button_hovered);
-    colors[ImGuiCol_ScrollbarGrabActive] = ImVec4(
-        theme.accent.red, theme.accent.green, theme.accent.blue, 0.70f);
-    colors[ImGuiCol_ResizeGrip] = ImVec4(
-        theme.accent.red, theme.accent.green, theme.accent.blue, 0.0f);
-    colors[ImGuiCol_ResizeGripHovered] = ImVec4(
-        theme.accent.red, theme.accent.green, theme.accent.blue, 0.45f);
-    colors[ImGuiCol_ResizeGripActive] = ImVec4(
-        theme.accent.red, theme.accent.green, theme.accent.blue, 0.80f);
-    colors[ImGuiCol_Tab] = ImGuiColor(theme.window_background);
-    colors[ImGuiCol_TabHovered] = ImGuiColor(theme.button_hovered);
-    colors[ImGuiCol_TabSelected] = ImGuiColor(theme.child_background);
-    colors[ImGuiCol_TableHeaderBg] = ImGuiColor(theme.child_background);
-    colors[ImGuiCol_TableBorderStrong] = colors[ImGuiCol_Border];
-    colors[ImGuiCol_TableBorderLight] = ImVec4(
-        theme.border.red, theme.border.green, theme.border.blue, 0.55f);
+    colors[ImGuiCol_SliderGrabActive] = ImGuiColor(theme.accent_active);
+    colors[ImGuiCol_Separator] = ink(0.10f);
+    colors[ImGuiCol_SeparatorHovered] = accent(0.55f);
+    colors[ImGuiCol_SeparatorActive] = accent(0.85f);
+    colors[ImGuiCol_ScrollbarBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    colors[ImGuiCol_ScrollbarGrab] = ink(0.20f);
+    colors[ImGuiCol_ScrollbarGrabHovered] = ink(0.30f);
+    colors[ImGuiCol_ScrollbarGrabActive] = ink(0.40f);
+    colors[ImGuiCol_ResizeGrip] = accent(0.0f);
+    colors[ImGuiCol_ResizeGripHovered] = accent(0.45f);
+    colors[ImGuiCol_ResizeGripActive] = accent(0.80f);
+    colors[ImGuiCol_Tab] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    colors[ImGuiCol_TabHovered] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    colors[ImGuiCol_TabSelected] = ink(0.11f);
+    colors[ImGuiCol_TabSelectedOverline] = ImGuiColor(theme.accent);
+    colors[ImGuiCol_TabDimmed] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    colors[ImGuiCol_TabDimmedSelected] = ink(0.08f);
+    colors[ImGuiCol_TableHeaderBg] = ink(0.05f);
+    colors[ImGuiCol_TableBorderStrong] = ink(0.12f);
+    colors[ImGuiCol_TableBorderLight] = ink(0.07f);
+    colors[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    colors[ImGuiCol_TableRowBgAlt] = ink(0.03f);
+    colors[ImGuiCol_TextLink] = ImGuiColor(theme.info);
+    colors[ImGuiCol_TextSelectedBg] = accent(0.32f);
+    colors[ImGuiCol_NavCursor] = ImGuiColor(theme.accent);
+    colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.22f);
+    colors[ImGuiCol_PlotLines] = ImGuiColor(theme.accent);
+    colors[ImGuiCol_PlotHistogram] = ImGuiColor(theme.accent);
     style.ScaleAllSizes(scale);
 }
 
 bool ConfigurePlatformUiFontAtlas(const std::filesystem::path& runtime_root) noexcept {
+    return ConfigurePlatformUiFontAtlas(runtime_root, PlatformUiFontBake{});
+}
+
+bool ConfigurePlatformUiFontAtlas(
+    const std::filesystem::path& runtime_root, const PlatformUiFontBake& bake) noexcept {
     ImGuiIO& io = ImGui::GetIO();
     if (io.Fonts == nullptr) return false;
+    const std::span<const float> scales = bake.scales.empty()
+        ? std::span<const float>(kPlatformFontBakeScales)
+        : bake.scales;
     io.FontDefault = nullptr;
     io.Fonts->Clear();
+    // Drop the band of empty texture the power-of-two height adds. The host keeps it so
+    // its atlas stays the texture it always was; a surface that names its own bake can
+    // have the height the glyphs actually need.
+    if (bake.tight_atlas) io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
+    else io.Fonts->Flags &= ~ImFontAtlasFlags_NoPowerOfTwoHeight;
+    // Read once for all baked sizes: the atlas makes its own copy per source anyway.
+    const std::vector<unsigned char> cjk_bytes = LoadFontBytes(
+        runtime_root / L"assets" / L"fonts" / L"NotoSansCJKsc-Regular.ttf");
     ImFontConfig cjk_configuration;
-    static constexpr ImWchar icon_range[] = {0xE700, 0xF8FF, 0};
+    const ImWchar* const icon_range = PlatformIconGlyphRanges(bake.icons);
+    g_platform_font_bake_scales.assign(scales.begin(), scales.end());
     bool complete = true;
-    for (const float scale : kPlatformFontBakeScales) {
+    for (const float scale : scales) {
         ImFontConfig configuration;
         configuration.OversampleH = 2;
         configuration.OversampleV = 1;
@@ -492,8 +566,8 @@ bool ConfigurePlatformUiFontAtlas(const std::filesystem::path& runtime_root) noe
         cjk_configuration = {};
         cjk_configuration.MergeMode = true;
         cjk_configuration.PixelSnapH = true;
-        if (AddCachedFontFromPath(*io.Fonts,
-                runtime_root / L"assets" / L"fonts" / L"NotoSansCJKsc-Regular.ttf",
+        if (cjk_bytes.empty() ||
+            AddBorrowedFontFromMemory(*io.Fonts, cjk_bytes,
                 kPlatformFontSizePixels * scale, cjk_configuration,
                 PlatformChineseGlyphRanges(*io.Fonts)) == nullptr) {
             complete = false;
@@ -521,8 +595,8 @@ bool ApplyPlatformUiFontScale(const float scale) noexcept {
     if (!std::isfinite(scale) || scale <= 0.0f) return false;
     ImGuiIO& io = ImGui::GetIO();
     if (io.Fonts == nullptr) return false;
-    float selected_scale = kPlatformFontBakeScales.back();
-    for (const float baked_scale : kPlatformFontBakeScales) {
+    float selected_scale = g_platform_font_bake_scales.back();
+    for (const float baked_scale : g_platform_font_bake_scales) {
         if (baked_scale >= scale) {
             selected_scale = baked_scale;
             break;
@@ -548,6 +622,45 @@ bool ApplyPlatformUiFontScale(const float scale) noexcept {
     io.FontGlobalScale = scale;
     ApplyPlatformUiStyle();
     return true;
+}
+
+ImFont* PlatformUiFontForScale(const float scale) noexcept {
+    if (ImGui::GetCurrentContext() == nullptr) return nullptr;
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.Fonts == nullptr) return nullptr;
+    ImFont* best = nullptr;
+    ImFont* largest = nullptr;
+    for (const float baked : g_platform_font_bake_scales) {
+        ImFont* found = nullptr;
+        for (ImFont* const font : io.Fonts->Fonts) {
+            if (font != nullptr && IsPlatformFont(*font, baked)) {
+                found = font;
+                break;
+            }
+        }
+        if (found == nullptr) continue;
+        largest = found;
+        if (best == nullptr && baked >= scale - 0.001f) best = found;
+    }
+    if (best != nullptr) return best;
+    return largest != nullptr ? largest : io.FontDefault;
+}
+
+float PlatformUiBaseFontSize() noexcept { return kPlatformFontSizePixels; }
+
+void ReleasePlatformUiFontAtlas(const PlatformUiFontRetention retention) noexcept {
+    if (ImGui::GetCurrentContext() == nullptr) return;
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.Fonts == nullptr) return;
+    // Drops the alpha map and the RGBA32 copy the D3D backends ask ImGui for, which
+    // together are five times the atlas area. The sources stay behind, so a backend
+    // that re-creates the texture after a lost device rebuilds them on demand.
+    io.Fonts->ClearTexData();
+    if (retention != PlatformUiFontRetention::Minimal) return;
+    // Also drops the font files, which are already rasterized into the uploaded
+    // texture: nothing reads them again unless the atlas is rebuilt, so a caller that
+    // asks for this must not rebuild it.
+    io.Fonts->ClearInputData();
 }
 
 }  // namespace ue5mem

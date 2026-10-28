@@ -1,7 +1,9 @@
 #include "analyzer.hpp"
 #include "anomaly/core_api.hpp"
 #include "anomaly/adapter_service_registry.hpp"
+#include "anomaly/ace_unhook.hpp"
 #include "anomaly/crash_reporter.hpp"
+#include "anomaly/embedded_artwork.hpp"
 #include "anomaly/diagnostic_pipe_service.hpp"
 #include "anomaly/i18n.hpp"
 #include "anomaly/nte_profile_runtime.hpp"
@@ -37,6 +39,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <system_error>
 #include <utility>
 #include <vector>
@@ -45,21 +48,11 @@ extern "C" IMAGE_DOS_HEADER __ImageBase;
 
 namespace {
 
-constexpr int kNteEscMenuLogoResourceId = 102;
 
 [[nodiscard]] std::vector<std::uint8_t> LoadNteEscMenuLogoBytes() {
-    const auto module = reinterpret_cast<HMODULE>(&__ImageBase);
-    const HRSRC resource = FindResourceW(
-        module, MAKEINTRESOURCEW(kNteEscMenuLogoResourceId), RT_RCDATA);
-    if (resource == nullptr) return {};
-    const HGLOBAL loaded = LoadResource(module, resource);
-    const DWORD size = SizeofResource(module, resource);
-    const void* const bytes = loaded == nullptr ? nullptr : LockResource(loaded);
-    if (bytes == nullptr || size == 0) return {};
-    const auto* const first = static_cast<const std::uint8_t*>(bytes);
-    return {first, first + size};
+    const auto& bytes = anomaly::artwork::kEscMenuLogo;
+    return {bytes.begin(), bytes.end()};
 }
-
 struct CoreContext {
     std::filesystem::path runtime_root;
     std::filesystem::path log_directory;
@@ -260,8 +253,14 @@ DWORD InitializeCore(const std::shared_ptr<CoreContext>& context, std::stop_toke
             logger_options.minimum_level = static_cast<anomaly::LogLevel>(
                 platform_settings.values.diagnostics_log_level);
         }
-        logger_options.max_file_size_bytes = 16U * 1024U * 1024U;
-        logger_options.retained_archive_count = 4;
+        // Rotation bounds the files this session writes; retention deletes what
+        // earlier sessions left behind, so the log directory cannot grow forever.
+        logger_options.max_file_size_bytes = 8U * 1024U * 1024U;
+        logger_options.retained_archive_count = 3;
+        logger_options.retention_directories = {
+            context->log_directory, context->runtime_root};
+        logger_options.retention.max_age = std::chrono::hours{24 * 3};
+        logger_options.retention.max_total_bytes = 48U * 1024U * 1024U;
         auto logger = std::make_shared<anomaly::StructuredLogger>(std::move(logger_options));
         if (logger->Start(context->log_directory / L"anomaly-runtime.jsonl")) {
             context->logger = std::move(logger);
@@ -742,7 +741,12 @@ DWORD PreparePluginHost(
             });
         const auto esc_menu_logo = LoadNteEscMenuLogoBytes();
         if (!plugins->InstallDefaultNteEscMenuButton(esc_menu_logo)) {
-            throw std::runtime_error("failed to install the default NTE ESC menu button");
+            // The logo is a resource inside this image, and a core that was mapped without a loader -- the
+            // live-attach path -- can have its image headers hidden from module scanners, which is also
+            // what makes those resources unreadable. A missing decoration must not cost the whole runtime.
+            RuntimeLog(
+                context, anomaly::LogLevel::Warning, "plugin.host.esc_menu_button_skipped",
+                "plugin_host=esc_menu_button_skipped reason=logo-unavailable");
         }
         plugins->LoadAll();
         PublishPluginHost(context, std::move(plugins));
@@ -1376,7 +1380,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI AnomalyStart(
         auto session = std::make_shared<anomaly::RuntimeSession>(
             start_context, BuildSessionOptions(core_context));
         core_context->session = session;
-
+        // An injected core is the one that needs this: the anti-cheat inline-hooks the loader entry, and its
+        // hook is what asks the compatibility database about an image the loader cannot identify. The restore
+        // runs before the first service loads anything and keeps watching for the whole session.
+        anomaly::AceUnhookReport ace_unhook;
+        if (start_context.bootstrap_type == ANOMALY_BOOTSTRAP_TYPE_EXTERNAL) {
+            ace_unhook = anomaly::StartAntiCheatHookRestore(start_context.log_directory);
+        }
         auto& control = *g_runtime_control;
         std::scoped_lock lock(control.mutex);
         ArchiveStoppedSessionLocked(control);
@@ -1384,6 +1394,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI AnomalyStart(
 
         const DWORD result = session->Start();
         control.session = session;
+        if (start_context.bootstrap_type == ANOMALY_BOOTSTRAP_TYPE_EXTERNAL && ace_unhook.available) {
+            RuntimeLog(
+                core_context, anomaly::LogLevel::Info, "ace.unhook.restored",
+                "ace_unhook=restored count=" + std::to_string(ace_unhook.restored) +
+                    " rehooks=" + std::to_string(ace_unhook.rehooks) +
+                    " passes=" + std::to_string(ace_unhook.passes));
+        }
         if (result != ERROR_SUCCESS) ArchiveStoppedSessionLocked(control);
         return result;
     } catch (...) {
@@ -1395,6 +1412,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI AnomalyRequestStop() {
     if (g_runtime_control == nullptr) return ERROR_INVALID_STATE;
     std::shared_ptr<anomaly::RuntimeSession> session;
     {
+
         auto& control = *g_runtime_control;
         std::scoped_lock lock(control.mutex);
         session = control.session;
@@ -1421,6 +1439,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI AnomalyGetState(
 
     anomaly::RuntimeSessionSnapshot snapshot;
     {
+
         auto& control = *g_runtime_control;
         std::scoped_lock lock(control.mutex);
         snapshot = CurrentSnapshotLocked(control);
@@ -1435,6 +1454,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI AnomalyWaitForStop(DWORD timeout_m
     if (g_runtime_control == nullptr) return ERROR_INVALID_STATE;
     std::shared_ptr<anomaly::RuntimeSession> session;
     {
+
         auto& control = *g_runtime_control;
         std::scoped_lock lock(control.mutex);
         session = control.session;
