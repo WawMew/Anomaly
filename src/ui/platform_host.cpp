@@ -1118,9 +1118,11 @@ public:
                     // Keep the last good catalog visible when a package is being
                     // replaced or a manifest is temporarily unreadable.
                 }
-                for (int tick = 0; tick != 10 && !stop_token.stop_requested(); ++tick) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                }
+                // Waits for a directory notification or a stop request. The old fixed ten-tick wait rescanned
+                // every package on a clock; a quiet plugin directory now costs nothing.
+                std::unique_lock wait_lock(catalog_wait_mutex_);
+                catalog_wait_condition_.wait(wait_lock, stop_token, [this] { return catalog_reload_; });
+                catalog_reload_ = false;
             }
         });
         // The theme layout lives outside the plugin packages and is re-read on
@@ -1133,11 +1135,9 @@ public:
                 std::shared_ptr<ThemeBackgroundPick> dialog_request;
                 {
                     std::unique_lock lock(theme_layout_write_mutex_);
-                    theme_wait_condition_.wait_for(lock, std::chrono::seconds(1),
-                        [this, &stop_token] {
-                            return stop_token.stop_requested() ||
-                                theme_picker_dialog_request_ != nullptr;
-                        });
+                    theme_wait_condition_.wait(lock, stop_token, [this] {
+                        return theme_picker_dialog_request_ != nullptr;
+                    });
                     if (stop_token.stop_requested()) return;
                     dialog_request =
                         std::exchange(theme_picker_dialog_request_, nullptr);
@@ -1159,16 +1159,34 @@ public:
                 }
                 theme_wait_condition_.notify_all();
             }
-        });        theme_worker_ = std::jthread(
+        });
+        StartThemeWatcher(diagnostics_.runtime_root / std::filesystem::path(anomaly::kPlatformUiLayoutDirectory));
+        StartCatalogWatcher(directory);
+        theme_worker_ = std::jthread(
             [this, root = diagnostics_.runtime_root](std::stop_token stop_token) {
                 std::uint64_t version = 0;
                 ThemeLayoutFileStamp previous;
                 std::filesystem::path previous_path;
                 bool primed = false;
                 while (!stop_token.stop_requested()) {
+                    // Blocks until there is work. The predicate names every slot
+                    // this loop consumes, because a wait that returned on any
+                    // notification and then slept again would swallow the request
+                    // and leave the previous palette's artwork on screen for the
+                    // rest of the session.
+                    bool requested = false;
+                    {
+                        std::unique_lock wait_lock(theme_layout_write_mutex_);
+                        theme_wait_condition_.wait(wait_lock, stop_token,
+                            [this] { return ThemeWorkerPending(); });
+                        if (stop_token.stop_requested()) break;
+                        // Cleared while the posters' mutex is still held, so a
+                        // request arriving from here on leaves the flag set and
+                        // the next pass picks it up instead of losing it.
+                        requested = theme_layout_reload_.exchange(
+                            false, std::memory_order_relaxed);
+                    }
                     try {
-                        const bool requested =
-                            theme_layout_reload_.exchange(false, std::memory_order_relaxed);
                         // The palette picks the file: a per-palette layout under
                         // config/themes wins over the shared one, so switching
                         // palettes switches artwork instead of layering it.
@@ -1334,9 +1352,6 @@ public:
                         theme_background_pick_result_ = std::make_shared<ThemeBackgroundPick>();
                         theme_background_pick_result_->message = "cannot apply the background image";
                     }
-                    std::unique_lock wait_lock(theme_wait_mutex_);
-                    theme_wait_condition_.wait_for(
-                        wait_lock, stop_token, std::chrono::seconds(1), [] { return false; });
                 }
             });
         management_window_ = plugins_.UiResources().RegisterWindow(
@@ -1361,14 +1376,102 @@ public:
         catalog_worker_.request_stop();
         StopThemeWorker();
         theme_worker_.join();
+        theme_watcher_.request_stop();
+        catalog_watcher_.request_stop();
+        if (catalog_watch_stop_ != nullptr) {
+            SetEvent(catalog_watch_stop_);
+            catalog_watcher_.join();
+            CloseHandle(catalog_watch_stop_);
+            catalog_watch_stop_ = nullptr;
+        }
+        if (theme_watch_stop_ != nullptr) {
+            SetEvent(theme_watch_stop_);
+            theme_watcher_.join();
+            CloseHandle(theme_watch_stop_);
+            theme_watch_stop_ = nullptr;
+        }
         ReleaseThemeTextures();
         RevokeManagementWindow();
     }
 
     void StopThemeWorker() noexcept {
+        if (theme_watch_stop_ != nullptr) SetEvent(theme_watch_stop_);
+        if (catalog_watch_stop_ != nullptr) SetEvent(catalog_watch_stop_);
         theme_picker_worker_.request_stop();
         theme_worker_.request_stop();
         theme_wait_condition_.notify_all();
+    }
+
+
+    // Blocks on the directory change notification: a theme edited outside the UI reloads at once, and an
+    // idle one costs nothing because there is no interval to wake up on.
+    // Watches a directory until the UI stops. `on_change` runs on this thread and must not block.
+    void WatchDirectory(const std::filesystem::path& directory, const HANDLE stop_event,
+        const std::function<void()>& on_change) noexcept {
+        const HANDLE change = FindFirstChangeNotificationW(
+            directory.c_str(), FALSE,
+            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_FILE_NAME |
+                FILE_NOTIFY_CHANGE_DIR_NAME);
+        if (change == INVALID_HANDLE_VALUE) return;
+        for (;;) {
+            const HANDLE handles[] = {change, stop_event};
+            if (WaitForMultipleObjects(2, handles, FALSE, INFINITE) != WAIT_OBJECT_0) break;
+            on_change();
+            if (FindNextChangeNotification(change) == FALSE) break;
+        }
+        FindCloseChangeNotification(change);
+    }
+
+    // Everything the theme worker has to look at. Read under the mutex the
+    // settings page and the picker post their intents with, so the wait cannot
+    // miss a request: a slot that is already filled keeps the predicate true and
+    // the worker runs instead of going back to sleep.
+    [[nodiscard]] bool ThemeWorkerPending() const noexcept {
+        return theme_layout_reload_.load(std::memory_order_relaxed) ||
+            theme_background_mode_request_ >= 0 || theme_surface_opacity_request_ >= 0.0f ||
+            theme_background_pick_request_ != nullptr;
+    }
+
+    // Posts a reload request. The flag is set while the mutex the worker waits on
+    // is held, because a request that lands between the worker's predicate and its
+    // block would otherwise be lost and the worker would sleep through it.
+    void RequestThemeReload() noexcept {
+        {
+            std::scoped_lock lock(theme_layout_write_mutex_);
+            theme_layout_reload_.store(true, std::memory_order_relaxed);
+        }
+        theme_wait_condition_.notify_all();
+    }
+
+    void WatchThemeDirectory() noexcept {
+        WatchDirectory(theme_watch_directory_, theme_watch_stop_, [this] {
+            RequestThemeReload();
+        });
+    }
+
+    void StartThemeWatcher(const std::filesystem::path& themes_directory) noexcept {
+        std::error_code error;
+        if (!std::filesystem::is_directory(themes_directory, error) || error) return;
+        theme_watch_directory_ = themes_directory;
+        theme_watch_stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (theme_watch_stop_ == nullptr) return;
+        theme_watcher_ = std::jthread([this](std::stop_token) { WatchThemeDirectory(); });
+    }
+
+    // The plugin directory is watched instead of rescanned: a package appearing, vanishing or being
+    // rewritten wakes the catalog worker, and nothing wakes it in between.
+    void StartCatalogWatcher(const std::filesystem::path& plugins_directory) noexcept {
+        std::error_code error;
+        if (!std::filesystem::is_directory(plugins_directory, error) || error) return;
+        catalog_watch_stop_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (catalog_watch_stop_ == nullptr) return;
+        catalog_watcher_ = std::jthread([this, plugins_directory](std::stop_token) {
+            WatchDirectory(plugins_directory, catalog_watch_stop_, [this] {
+                std::scoped_lock lock(catalog_wait_mutex_);
+                catalog_reload_ = true;
+                catalog_wait_condition_.notify_all();
+            });
+        });
     }
 
     [[nodiscard]] bool Ready() const noexcept { return static_cast<bool>(management_window_); }
@@ -1729,8 +1832,7 @@ private:
                 theme_layout_palette_ = active_palette;
             } else if (*theme_layout_palette_ != active_palette) {
                 theme_layout_palette_ = active_palette;
-                theme_layout_reload_.store(true, std::memory_order_relaxed);
-                theme_wait_condition_.notify_all();
+                RequestThemeReload();
                 return;
             }
             std::shared_ptr<ThemeLayoutCache> published;
@@ -1776,6 +1878,17 @@ private:
                 return target;
             };
             state->background = resolve(background);
+            // Textures are requested through the render side, which may not have a device or descriptor heap yet
+            // on the frame the layout arrives. Recording the version as applied in that state left the artwork
+            // missing for the rest of the session, so an incomplete resolve leaves it un-applied and asks again a
+            // frame later instead.
+            const auto missing = [](const ThemeImage& image) {
+                return image.width > 0.0f && image.height > 0.0f && !image.Valid();
+            };
+            bool textures_incomplete = missing(state->background);
+            for (const ThemeImage& sticker : state->stickers) {
+                textures_incomplete = textures_incomplete || missing(sticker);
+            }
             state->stickers.reserve(stickers.size());
             for (const anomaly::UiRgba8Image& image : stickers) {
                 state->stickers.push_back(resolve(image));
@@ -1795,6 +1908,19 @@ private:
             state->layout = std::move(published->layout);
             state->message = published->message;
             theme_layout_applied_ = std::move(state);
+            if (textures_incomplete) {
+                // The pixels this pass resolved were consumed by the move above, so retrying means asking the
+                // worker to decode and publish again, not reading the same cache. The version stays un-applied
+                // until that happens, and the ask is throttled so a render side that is never ready does not
+                // spin the worker.
+                theme_layout_applied_version_ = 0;
+                if (++theme_texture_retry_ >= 300) {
+                    theme_texture_retry_ = 0;
+                    RequestThemeReload();
+                }
+                return;
+            }
+            theme_texture_retry_ = 0;
             theme_style_dirty_ = true;
             // Keep the page's fill-mode control on what was just applied, unless
             // the user is mid-change on it. A pending change stops being pending
@@ -6369,15 +6495,27 @@ private:
                 Text(anomaly::MessageId::SettingsBackgroundVisibility),
                 Text(anomaly::MessageId::SettingsBackgroundVisibilityHint),
                 "veil opacity dim wallpaper readability", [&] {
-                    int value = static_cast<int>(std::lround(
-                        std::clamp(theme_surface_opacity_, 0.0f, 1.0f) * 100.0f));
+                    int value = static_cast<int>(std::lround(std::clamp(
+                        theme_surface_opacity_edit_.value_or(theme_surface_opacity_),
+                        anomaly::kPlatformUiLayoutSurfaceOpacityMinimum, 1.0f) * 100.0f));
                     if (anomaly::glass::SliderInt("##value", &value,
                             static_cast<int>(
                                 anomaly::kPlatformUiLayoutSurfaceOpacityMinimum * 100.0f),
                             100, "%d%%")) {
-                        const float chosen = static_cast<float>(value) / 100.0f;
+                        // Dragging only holds a pending value, exactly like the
+                        // scale slider: committing the veil writes the shared
+                        // layout and reloads the theme, so it waits for the
+                        // release instead of running once per frame.
+                        theme_surface_opacity_edit_ = static_cast<float>(value) / 100.0f;
+                    }
+                    if (theme_surface_opacity_edit_ && !ImGui::IsItemActive() &&
+                        !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                        const float chosen = *theme_surface_opacity_edit_;
+                        theme_surface_opacity_edit_.reset();
                         std::scoped_lock lock(theme_layout_write_mutex_);
                         theme_surface_opacity_request_ = chosen;
+                        // Hold the control on the value just committed until the
+                        // worker has written and applied it.
                         theme_surface_opacity_ = chosen;
                         theme_surface_opacity_dirty_ = true;
                         theme_wait_condition_.notify_all();
@@ -8105,16 +8243,36 @@ private:
     float theme_surface_opacity_request_{-1.0f};
     float theme_surface_opacity_{1.0f};
     bool theme_surface_opacity_dirty_{};
+    // A veil the user is still dragging. Held until the slider is released,
+    // because every commit costs a layout write plus a theme reload.
+    std::optional<float> theme_surface_opacity_edit_;
     // D3D11 views the standalone surface created for the current theme layout.
     // They live as long as the layout that produced them.
     std::vector<ID3D11ShaderResourceView*> standalone_theme_views_;
     std::uint64_t theme_layout_applied_version_{};
+    // Frames to wait before asking for the theme textures again after a device that was not ready refused them.
+    std::uint32_t theme_texture_retry_{};
     bool theme_style_dirty_{};
     std::atomic<bool> theme_layout_reload_{true};
     mutable std::mutex theme_layout_mutex_;
-    std::mutex theme_wait_mutex_;
+    // _any, and waited on with the mutex the intents above are posted under: the
+    // predicate has to see those slots, and the wait takes the worker's stop token
+    // so a stop wakes it without an extra event.
     std::condition_variable_any theme_wait_condition_;
     std::jthread theme_worker_;
+    // Watches config/themes so an edit made outside the UI is noticed by a notification instead of a
+    // timer: the wait blocks until the directory changes or the UI stops.
+    std::jthread theme_watcher_;
+    HANDLE theme_watch_stop_{};
+    std::filesystem::path theme_watch_directory_;
+    // The plugin directory is watched the same way: a package appearing or vanishing wakes the catalog
+    // worker, and nothing wakes it in between.
+    std::jthread catalog_watcher_;
+    HANDLE catalog_watch_stop_{};
+    std::mutex catalog_wait_mutex_;
+    // _any: the wait takes the worker's stop token, so a stop wakes it without an extra event.
+    std::condition_variable_any catalog_wait_condition_;
+    bool catalog_reload_{true};
     // The picker thread services dialog requests so the render loop never waits.
     // Declared after the layout worker so it stops first at teardown.
     std::shared_ptr<ThemeBackgroundPick> theme_picker_dialog_request_;
