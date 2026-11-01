@@ -1474,6 +1474,18 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         MANIFEST plugins/CloneEnter/manifest.json
         PACKAGE_NAME CloneEnter
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/CloneEnter")
+    anomaly_add_plugin(anomaly_builtin_scene_loader
+        SOURCES plugins/SceneLoader/plugin.cpp
+        MANIFEST plugins/SceneLoader/manifest.json
+        PACKAGE_NAME SceneLoader
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/SceneLoader")
+    if(ANOMALY_BUILD_TEST_FIXTURES)
+        add_executable(anomaly_scene_loader_fixture plugins/SceneLoader/tests.cpp)
+        target_compile_features(anomaly_scene_loader_fixture PRIVATE cxx_std_20)
+        target_compile_options(anomaly_scene_loader_fixture PRIVATE /W4 /permissive- /EHsc /utf-8)
+        target_compile_definitions(anomaly_scene_loader_fixture PRIVATE
+            SCENE_LOADER_ZH_CN_CATALOG="${CMAKE_SOURCE_DIR}/plugins/SceneLoader/locales/zh-CN.json")
+    endif()
 
     anomaly_add_plugin(anomaly_builtin_damage_dashboard
         SOURCES plugins/DamageDashboard/plugin.cpp
@@ -1607,6 +1619,11 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         MANIFEST plugins/ModelScale/manifest.json
         PACKAGE_NAME ModelScale
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/ModelScale")
+    anomaly_add_plugin(anomaly_builtin_npc_summon
+        SOURCES plugins/NpcSummon/plugin.cpp
+        MANIFEST plugins/NpcSummon/manifest.json
+        PACKAGE_NAME NpcSummon
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/NpcSummon")
     target_link_libraries(anomaly_builtin_hifi_vehicle_music PRIVATE
         nlohmann_json::nlohmann_json anomaly_miniaudio anomaly_rtaudio_asio anomaly_monkeys_audio anomaly_dsd2pcm
         ole32 shell32 uuid avrt winmm winhttp)
@@ -1668,12 +1685,13 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         anomaly_builtin_fake_uid anomaly_builtin_camera_tools
         anomaly_builtin_camera_blur_fix anomaly_builtin_better_pose
         anomaly_builtin_wallet_collector anomaly_builtin_box_auto anomaly_builtin_combat_box
-        anomaly_builtin_clone_enter anomaly_builtin_damage_dashboard
+        anomaly_builtin_clone_enter anomaly_builtin_scene_loader anomaly_builtin_damage_dashboard
         anomaly_builtin_nte_quick_ultimate
         anomaly_builtin_nte_free_fly anomaly_builtin_skin_changer anomaly_builtin_ui_buttons
         anomaly_builtin_dll_loader anomaly_builtin_hifi_vehicle_music
         anomaly_builtin_model_scale anomaly_builtin_autofish
-        anomaly_builtin_deserted anomaly_builtin_jelly anomaly_builtin_night999)
+        anomaly_builtin_deserted anomaly_builtin_jelly anomaly_builtin_night999
+        anomaly_builtin_npc_summon)
     if(ANOMALY_BUILD_TEST_PLUGINS)
         list(APPEND ANOMALY_BUILTIN_PLUGIN_TARGETS
             anomaly_builtin_nte_movement_hold
@@ -1692,6 +1710,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         target_compile_options(anomaly_builtin_box_auto PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_combat_box PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_clone_enter PRIVATE /utf-8)
+        target_compile_options(anomaly_builtin_scene_loader PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_damage_dashboard PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_nte_free_fly PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_skin_changer PRIVATE /utf-8)
@@ -1700,6 +1719,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         target_compile_options(anomaly_builtin_deserted PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_hifi_vehicle_music PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_night999 PRIVATE /utf-8)
+        target_compile_options(anomaly_builtin_npc_summon PRIVATE /utf-8)
     endif()
     add_dependencies(anomaly_test_host ${ANOMALY_BUILTIN_PLUGIN_TARGETS})
     if(TARGET anomaly-platform-preview)
@@ -1750,6 +1770,7 @@ anomaly_stage_platform_preview_plugin(anomaly_builtin_wallet_collector WalletCol
 anomaly_stage_platform_preview_plugin(anomaly_builtin_box_auto BoxAuto)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_combat_box CombatBox)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_clone_enter CloneEnter)
+anomaly_stage_platform_preview_plugin(anomaly_builtin_scene_loader SceneLoader)
 anomaly_stage_platform_preview_plugin(
     anomaly_builtin_damage_dashboard DamageDashboard)
 anomaly_stage_platform_preview_plugin(
