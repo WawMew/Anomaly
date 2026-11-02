@@ -2,25 +2,60 @@
   "schemaVersion": 2,
   "id": "anomaly.local.box-pickup-probe",
   "name": "Box Pickup Probe",
-  "description": "Temporary probe comparing the interaction RPC pickup path with a direct interface vtable call on loot actors taken from the Host entity frame.",
+  "description": "Temporary probe: one button per pickup path BoxAuto uses (ServerInteract, TriggerInteract, Host pickup) plus the PinkPawHeistESP container vtable call.",
   "author": "Anomaly",
   "license": "AGPL-3.0-only",
   "audience": "developer",
   "version": "0.1.0",
   "entry": "plugin.dll",
-  "api": {"major": 1, "minMinor": 0, "maxMinor": 0},
-  "games": ["nte"],
-  "builds": ["nte-*"],
+  "api": {
+    "major": 1,
+    "minMinor": 0,
+    "maxMinor": 0
+  },
+  "games": [
+    "nte"
+  ],
+  "builds": [
+    "nte-*"
+  ],
   "loadPhase": "game-ready",
   "services": [
-    {"id": "anomaly.core", "minVersion": 1},
-    {"id": "anomaly.ui", "minVersion": 1},
-    {"id": "anomaly.localization", "minVersion": 1},
-    {"id": "anomaly.interop.signature", "minVersion": 1},
-    {"id": "anomaly.ue5.names", "minVersion": 1},
-    {"id": "anomaly.nte.entities", "minVersion": 1}
+    {
+      "id": "anomaly.core",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.ui",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.localization",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.interop.signature",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.ue5.names",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.nte.entities",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.nte.pickup",
+      "minVersion": 1
+    }
   ],
   "capabilities": [
-    "ui", "memory-read", "interop-signature", "ue5-names", "nte-entity-snapshot"
+    "ui",
+    "memory-read",
+    "interop-signature",
+    "ue5-names",
+    "nte-entity-snapshot",
+    "nte-pickup"
   ]
 }

@@ -22,8 +22,10 @@
 
 #include <Windows.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -94,6 +96,7 @@ constexpr std::uint32_t kFuncNativeFlag = 0x400;
 // actor returns 360-byte elements whose first int32 is the choice, BPCanTryInteract
 // (controller, choice) reports a byte, and TriggerInteract(actor, choice, 0) performs it.
 constexpr std::size_t kInteractEntriesParams = 24;
+constexpr std::size_t kServerInteractParams = 12;
 constexpr std::size_t kCanTryParams = 13;
 constexpr std::size_t kTriggerInteractParams = 13;
 constexpr std::uintptr_t kInteractArrayStride = 360;
@@ -124,17 +127,43 @@ constexpr std::array<std::string_view, 10> kLootClassPrefixes{
     "HunterBox_", "CharacterUpBox_", "ChameleonBox", "FurnitureBox", "PropBox_Geft",
     "PropBox_Yahaha", "PropBox_Once", "Prison", "InteractBox", "ShopStealGoods_"};
 
-enum class Action : std::uint32_t { none = 0, rpc = 1, vtable = 2, diagnostic = 3 };
+enum class Action : std::uint32_t {
+    none = 0,
+    server_interact = 1,
+    trigger_interact = 2,
+    host_pickup = 3,
+    vtable = 4,
+    diagnostic = 5,
+};
+
+// BoxAuto only ever interacts inside 250cm (120cm in developer mode); the probe keeps a
+// looser ring so a press still reports "too far" instead of silently picking a box across
+// the map.
+constexpr double kInteractTargetRadiusCentimeters = 400.0;
+// The Host pickup request from BoxAuto's food path.
+constexpr double kPickupRadiusCentimeters = 600.0;
+constexpr std::uint32_t kPickupMaximumItems = 1;
+constexpr auto kPickupTimeout = std::chrono::milliseconds(8000);
 
 struct Candidate final {
     std::uintptr_t actor{};
     std::string class_name;
+    // Planar distance from the player camera, in centimetres.
+    double distance{};
 };
 
 struct ScanResult final {
     std::uintptr_t g_objects{};
     std::uint64_t entity_count{};
     std::vector<Candidate> candidates;
+};
+
+// nte.pickup answers on a later tick: the sequence proves a request ran, `confirmed` counts
+// the actors whose registry slot disappeared while the Host watched them.
+struct PickupWatch final {
+    bool active{};
+    std::uint64_t baseline{};
+    std::chrono::steady_clock::time_point deadline{};
 };
 
 struct InterfaceHit final {
@@ -159,6 +188,7 @@ struct Context final {
     const AnomalySignatureServiceV1* signature{};
     const AnomalyUe5NamesServiceV1* names{};
     const AnomalyNteEntitiesServiceV1* entities{};
+    const AnomalyNtePickupServiceV1* pickup{};
     std::uintptr_t g_objects_address{};
     std::uintptr_t g_world_address{};
     std::uintptr_t controller{};
@@ -172,6 +202,7 @@ struct Context final {
     Action running{Action::none};
     ScanResult scan;
     VerifyState verify;
+    PickupWatch pickup_watch;
     std::vector<std::pair<std::uint64_t, std::string>> entity_class_names;
     std::vector<std::pair<std::uintptr_t, std::ptrdiff_t>> interact_finish_offsets;
     std::vector<std::string> report;
@@ -635,6 +666,9 @@ bool GetController(Context& context) noexcept {
     context.controller = controller;
     context.server_interact = fn;
     context.trigger_interact = trigger;
+    Log(
+        context, "probe controller=" + Hex(controller) + " class=" + Hex(controller_class) +
+                     " server_interact=" + Hex(fn) + " trigger_interact=" + Hex(trigger));
     return true;
 }
 
@@ -728,10 +762,20 @@ bool CollectTargets(Context& context) {
                 context, context.g_objects_address,
                 static_cast<std::uint32_t>(snapshot.entity_id - 1U));
             if (actor == 0) continue;
-            context.scan.candidates.push_back({actor, class_name});
+            const double dx = snapshot.bounds_center[0] - frame.camera_position[0];
+            const double dy = snapshot.bounds_center[1] - frame.camera_position[1];
+            context.scan.candidates.push_back(
+                {actor, class_name, std::sqrt(dx * dx + dy * dy)});
         }
         offset = result.next_offset > offset ? result.next_offset : offset + result.returned;
     }
+    // The buttons act on the box the player is standing next to, like BoxAuto does after it
+    // has closed the distance, so the nearest candidate has to come first.
+    std::sort(
+        context.scan.candidates.begin(), context.scan.candidates.end(),
+        [](const Candidate& left, const Candidate& right) {
+            return left.distance < right.distance;
+        });
     return true;
 }
 
@@ -838,7 +882,34 @@ void BeginVerify(
 
 // BoxAuto's order: arm the entry through the actor, fire the controller's TriggerInteract,
 // and only fall back to ServerInteract when the actor offers no entry at all.
-void RunRpc(
+// The box the player is standing next to. BoxAuto closes the distance before it interacts;
+// the probe refuses instead of firing at a box across the map, which is why the report says
+// "too far" rather than silently doing nothing.
+const Candidate* NearestTarget(const ScanResult& scan) noexcept {
+    for (const auto& candidate : scan.candidates) {
+        if (candidate.distance <= kInteractTargetRadiusCentimeters) return &candidate;
+    }
+    return nullptr;
+}
+
+void ReportTooFar(
+    Context& context,
+    const ScanResult& scan,
+    std::vector<std::string>& out) {
+    const std::string nearest = scan.candidates.empty()
+        ? std::string("n/a")
+        : std::to_string(static_cast<long long>(scan.candidates.front().distance));
+    const std::array<std::string, 1> arguments{nearest};
+    AddReportLine(out, context.localizer.Format(
+        "status.no_target",
+        "Nearest loot actor is {0} cm away; stand next to the box and press again",
+        Views(arguments)));
+    Log(context, "probe no-target nearest=" + nearest);
+}
+
+// Method 1 - BoxAuto's open-box call: ServerInteract(actor, 0) on the player controller with
+// a twelve byte parameter block that only carries the actor pointer.
+void RunServerInteract(
     Context& context,
     const ScanResult& scan,
     std::vector<std::string>& out) {
@@ -852,87 +923,196 @@ void RunRpc(
         AddError(context, out, "PROFILE", "ServerInteract");
         return;
     }
-    std::size_t armed{};
+    const Candidate* target = NearestTarget(scan);
+    if (target == nullptr) {
+        ReportTooFar(context, scan, out);
+        return;
+    }
+    std::uintptr_t cls{};
+    Read(context, target->actor + kObjectClassOffset, cls);
+    std::uint8_t params[kServerInteractParams]{};
+    std::memcpy(params, &target->actor, sizeof(target->actor));
+    const bool dispatched = InvokeProcessEvent(
+        context, reinterpret_cast<void*>(context.controller),
+        reinterpret_cast<void*>(context.server_interact), params);
+    Log(
+        context, "probe server-interact actor=" + Hex(target->actor) + " class=" +
+                     target->class_name + " cm=" +
+                     std::to_string(static_cast<long long>(target->distance)) +
+                     " dispatched=" + std::to_string(dispatched ? 1 : 0));
+    if (!dispatched) {
+        AddError(context, out, "SERVERINTERACT", "dispatch failed");
+        return;
+    }
+    BeginVerify(context, target->actor, cls, target->class_name);
+    const std::array<std::string, 2> arguments{
+        target->class_name, std::to_string(static_cast<long long>(target->distance))};
+    AddReportLine(out, context.localizer.Format(
+        "status.server", "ServerInteract sent to {0} ({1} cm)", Views(arguments)));
+}
+
+// Method 2 - BoxAuto's TriggerInteractPickup: read the actor's interact entries, ask
+// BPCanTryInteract whether a choice is armed, then perform it with
+// TriggerInteract(actor, choice, onlyClientSide = 0) on the controller. This is the path the
+// Host's own nte.pickup bridge runs internally.
+void RunTriggerInteract(
+    Context& context,
+    const ScanResult& scan,
+    std::vector<std::string>& out) {
+    AddScanLine(context, out, scan);
+    if (scan.candidates.empty()) {
+        AddReportLine(
+            out, context.localizer.Text("status.no_candidates", "No candidate objects"));
+        return;
+    }
+    if (!GetController(context)) {
+        AddError(context, out, "PROFILE", "TriggerInteract");
+        return;
+    }
+    const Candidate* target = NearestTarget(scan);
+    if (target == nullptr) {
+        ReportTooFar(context, scan, out);
+        return;
+    }
+    const auto actor = target->actor;
+    std::uintptr_t cls{};
+    Read(context, actor + kObjectClassOffset, cls);
+    std::uintptr_t entries_fn{};
+    std::uintptr_t can_try_fn{};
+    std::vector<std::int32_t> choices;
+    const bool has_fns =
+        cls != 0 &&
+        FindFunction(context, cls, "BPGetInteractEntries", 2, 24, entries_fn) &&
+        FindFunction(context, cls, "BPCanTryInteract", 3, 13, can_try_fn);
+    const bool has_choices =
+        has_fns && ReadInteractChoices(context, actor, entries_fn, choices);
     std::size_t can_try_total{};
-    std::size_t fired{};
-    std::size_t logged{};
-    for (const auto& candidate : scan.candidates) {
-        const auto actor = candidate.actor;
-        std::uintptr_t cls{};
-        Read(context, actor + kObjectClassOffset, cls);
-        std::uintptr_t entries_fn{};
-        std::uintptr_t can_try_fn{};
-        std::vector<std::int32_t> choices;
-        const bool has_fns =
-            cls != 0 &&
-            FindFunction(context, cls, "BPGetInteractEntries", 2, 24, entries_fn) &&
-            FindFunction(context, cls, "BPCanTryInteract", 3, 13, can_try_fn);
-        const bool has_choices =
-            has_fns && ReadInteractChoices(context, actor, entries_fn, choices);
-        std::string arming = has_fns ? std::to_string(choices.size()) : "no-functions";
-        if (has_choices && !choices.empty()) {
-            ++armed;
-            bool triggered{};
-            for (const auto choice : choices) {
-                bool can_try{};
-                if (!CanTryInteract(context, actor, choice, can_try_fn, can_try) ||
-                    !can_try) {
-                    continue;
-                }
-                ++can_try_total;
-                if (arming.find("can_try") == std::string::npos) arming += " can_try=1";
-                if (context.trigger_interact == 0) continue;
-                std::uint8_t params[kTriggerInteractParams]{};
-                std::memcpy(params + 0, &actor, sizeof(actor));
-                std::memcpy(params + 8, &choice, sizeof(choice));
-                params[12] = 0;
-                if (InvokeNative(
-                        context, reinterpret_cast<void*>(context.controller),
-                        reinterpret_cast<void*>(context.trigger_interact), params)) {
-                    triggered = true;
-                    break;
-                }
+    bool fired{};
+    std::string choice_used;
+    if (has_choices) {
+        for (const auto choice : choices) {
+            bool can_try{};
+            if (!CanTryInteract(context, actor, choice, can_try_fn, can_try) || !can_try) {
+                continue;
             }
-            if (arming.find("can_try") == std::string::npos) arming += " can_try=0";
-            if (triggered) {
-                ++fired;
-                Log(
-                    context, "probe candidate class=" + candidate.class_name + " actor=" +
-                                 Hex(actor) + " entries=" + arming + " path=trigger");
-                BeginVerify(context, actor, cls, candidate.class_name);
+            ++can_try_total;
+            if (context.trigger_interact == 0) continue;
+            std::uint8_t params[kTriggerInteractParams]{};
+            std::memcpy(params + 0, &actor, sizeof(actor));
+            std::memcpy(params + 8, &choice, sizeof(choice));
+            params[12] = 0;
+            if (InvokeNative(
+                    context, reinterpret_cast<void*>(context.controller),
+                    reinterpret_cast<void*>(context.trigger_interact), params)) {
+                fired = true;
+                choice_used = std::to_string(choice);
                 break;
             }
         }
-        if (logged < 4) {
-            Log(
-                context, "probe candidate class=" + candidate.class_name + " actor=" +
-                             Hex(actor) + " entries=" + arming);
-            ++logged;
-        }
-        // BoxAuto opens every resource box through ServerInteract; the entry chain above only
-        // arms what the game already considers interactable, so it is the fallback rather
-        // than the other way around.
-        if (context.server_interact == 0) continue;
-        std::uint8_t params[12]{};
-        std::memcpy(params, &actor, sizeof(actor));
-        if (InvokeProcessEvent(
-                context, reinterpret_cast<void*>(context.controller),
-                reinterpret_cast<void*>(context.server_interact), params)) {
-            ++fired;
-            Log(
-                context, "probe candidate class=" + candidate.class_name + " actor=" +
-                             Hex(actor) + " entries=" + arming + " path=server-interact");
-            BeginVerify(context, actor, cls, candidate.class_name);
-            break;
-        }
     }
-    const std::array<std::string, 4> arguments{
-        std::to_string(scan.candidates.size()), std::to_string(armed),
-        std::to_string(can_try_total), std::to_string(fired)};
+    Log(
+        context, "probe trigger actor=" + Hex(actor) + " class=" + target->class_name +
+                     " cm=" + std::to_string(static_cast<long long>(target->distance)) +
+                     " fns=" + std::to_string(has_fns ? 1 : 0) +
+                     " entries=" + std::to_string(choices.size()) +
+                     " can_try=" + std::to_string(can_try_total) +
+                     " trigger_fn=" + Hex(context.trigger_interact) +
+                     " fired=" + std::to_string(fired ? 1 : 0));
+    if (!fired) {
+        const std::array<std::string, 3> arguments{
+            std::to_string(has_fns ? 1 : 0), std::to_string(choices.size()),
+            std::to_string(can_try_total)};
+        AddReportLine(out, context.localizer.Format(
+            "status.trigger_miss",
+            "Not armed: functions {0}, entries {1}, can-try {2} (trigger {3})",
+            Views(arguments)));
+        return;
+    }
+    BeginVerify(context, actor, cls, target->class_name);
+    const std::array<std::string, 2> arguments{target->class_name, choice_used};
     AddReportLine(out, context.localizer.Format(
-        "status.rpc", "RPC: candidates {0}, armed {1}, can-try {2}, fired {3}",
-        Views(arguments)));
+        "status.trigger", "TriggerInteract {1} on {0}", Views(arguments)));
 }
+
+// Method 3 - BoxAuto's food path: it never touches the actor for these, it asks the Host for
+// request_nearby(radius 600, one item) and reads the confirmation off the pickup snapshot.
+void RunHostPickup(
+    Context& context,
+    const ScanResult& scan,
+    std::vector<std::string>& out) {
+    AddScanLine(context, out, scan);
+    const auto* service = context.pickup;
+    if (service == nullptr || service->request_nearby == nullptr ||
+        service->snapshot == nullptr) {
+        AddError(context, out, "PICKUP", "nte.pickup unavailable");
+        return;
+    }
+    AnomalyNtePickupSnapshotV1 baseline{sizeof(baseline)};
+    if (service->snapshot(service->user, &baseline).code != ANOMALY_STATUS_V1_OK) {
+        AddError(context, out, "PICKUP", "snapshot failed");
+        return;
+    }
+    AnomalyNtePickupRequestV1 request{sizeof(request)};
+    request.flags = ANOMALY_NTE_PICKUP_V1_NONE;
+    request.radius = kPickupRadiusCentimeters;
+    request.maximum_items = kPickupMaximumItems;
+    const AnomalyStatusV1 status = service->request_nearby(service->user, &request);
+    Log(
+        context, "probe pickup request radius=" +
+                     std::to_string(static_cast<int>(kPickupRadiusCentimeters)) +
+                     " items=" + std::to_string(kPickupMaximumItems) + " baseline=" +
+                     std::to_string(baseline.sequence) + " status=" +
+                     std::to_string(status.code));
+    if (status.code != ANOMALY_STATUS_V1_OK) {
+        AddError(context, out, "PICKUP", "request_nearby rejected");
+        return;
+    }
+    context.pickup_watch.active = true;
+    context.pickup_watch.baseline = baseline.sequence;
+    context.pickup_watch.deadline = std::chrono::steady_clock::now() + kPickupTimeout;
+    AddReportLine(out, context.localizer.Text(
+        "status.pickup_waiting", "Pickup requested, waiting for the Host"));
+}
+
+// The Host runs a pickup request over several ticks; the verdict only exists once its
+// sequence advances, so the probe reads it back instead of assuming the call meant success.
+void PollPickup(Context& context) {
+    if (!context.pickup_watch.active) return;
+    const auto* service = context.pickup;
+    if (service == nullptr || service->snapshot == nullptr) {
+        context.pickup_watch.active = false;
+        return;
+    }
+    AnomalyNtePickupSnapshotV1 snapshot{sizeof(snapshot)};
+    const bool read = service->snapshot(service->user, &snapshot).code == ANOMALY_STATUS_V1_OK;
+    const bool valid = read && (snapshot.flags & ANOMALY_NTE_PICKUP_V1_VALID) != 0;
+    const bool finished = valid && snapshot.sequence > context.pickup_watch.baseline &&
+        snapshot.state == ANOMALY_NTE_PICKUP_V1_COMPLETE;
+    const bool expired = std::chrono::steady_clock::now() >= context.pickup_watch.deadline;
+    if (!finished && !expired) return;
+    context.pickup_watch.active = false;
+    const std::array<std::string, 4> arguments{
+        std::to_string(snapshot.confirmed), std::to_string(snapshot.triggered),
+        std::to_string(snapshot.nearby), std::to_string(snapshot.unconfirmed)};
+    const std::string line = finished
+        ? context.localizer.Format(
+              "status.pickup_done", "Pickup done: confirmed {0}, fired {1}, nearby {2}, open {3}",
+              Views(arguments))
+        : context.localizer.Format(
+              "status.pickup_timeout", "Pickup timed out: confirmed {0}, fired {1}, nearby {2}, open {3}",
+              Views(arguments));
+    Log(
+        context, "probe pickup seq=" + std::to_string(snapshot.sequence) +
+                     " state=" + std::to_string(snapshot.state) +
+                     " nearby=" + std::to_string(snapshot.nearby) +
+                     " triggered=" + std::to_string(snapshot.triggered) +
+                     " confirmed=" + std::to_string(snapshot.confirmed) +
+                     " unconfirmed=" + std::to_string(snapshot.unconfirmed) +
+                     " finished=" + std::to_string(finished ? 1 : 0));
+    std::scoped_lock lock(context.mutex);
+    context.report.push_back(line);
+}
+
 
 // PinkPawHeistESP's route: the container vtable lives at actor+872 and its slot 3 must still
 // hold the resolved pickup entry. The scan is only the fallback for classes that keep the
@@ -1089,6 +1269,8 @@ AnomalyStatusV1 ANOMALY_CALL Load(
         host, ANOMALY_UE5_NAMES_SERVICE_V1_ID, 1);
     context->entities = Query<AnomalyNteEntitiesServiceV1>(
         host, ANOMALY_NTE_ENTITIES_SERVICE_V1_ID, ANOMALY_NTE_ENTITIES_SERVICE_V1_VERSION);
+    context->pickup = Query<AnomalyNtePickupServiceV1>(
+        host, ANOMALY_NTE_PICKUP_SERVICE_V1_ID, ANOMALY_NTE_PICKUP_SERVICE_V1_VERSION);
     if (!UiReady(context->ui) || !MemoryReady(context->core) ||
         context->signature == nullptr || context->signature->resolve == nullptr ||
         !NamesReady(context->names)) {
@@ -1134,6 +1316,14 @@ void ANOMALY_CALL Update(void* user, double) {
     {
         std::scoped_lock lock(context->mutex);
         if (!context->started) return;
+    }
+    // Both verdicts arrive on a later game tick than the press that started them: the box
+    // state check three seconds out, the pickup snapshot once the Host finishes its request.
+    // They have to run while the probe is idle, otherwise a press never reports its result.
+    CompleteVerify(*context);
+    PollPickup(*context);
+    {
+        std::scoped_lock lock(context->mutex);
         if (context->running == Action::none) {
             if (context->pending == Action::none) return;
             context->running = context->pending;
@@ -1141,8 +1331,6 @@ void ANOMALY_CALL Update(void* user, double) {
             context->report.clear();
         }
     }
-    // The post-interact check reads the box on the game thread, like the call it follows.
-    CompleteVerify(*context);
     Action running{Action::none};
     {
         std::scoped_lock lock(context->mutex);
@@ -1161,8 +1349,12 @@ void ANOMALY_CALL Update(void* user, double) {
         *context, "probe collect entities=" + std::to_string(context->scan.entity_count) +
                       " targets=" + std::to_string(context->scan.candidates.size()) +
                       " action=" + std::to_string(static_cast<int>(running)));
-    if (running == Action::rpc) {
-        RunRpc(*context, context->scan, out);
+    if (running == Action::server_interact) {
+        RunServerInteract(*context, context->scan, out);
+    } else if (running == Action::trigger_interact) {
+        RunTriggerInteract(*context, context->scan, out);
+    } else if (running == Action::host_pickup) {
+        RunHostPickup(*context, context->scan, out);
     } else if (running == Action::vtable) {
         RunVtable(*context, context->scan, out);
     } else {
@@ -1190,12 +1382,29 @@ void ANOMALY_CALL Draw(void* user, const AnomalyUiServiceV1* supplied_ui) {
         context->localizer.Label("window.title", "Pickup probe", "pickup-probe");
     anomaly::sdk::UiWindow window(ui, title);
     if (!window) return;
-    const std::string rpc_label = context->localizer.Label(
-        "action.rpc", "Interaction RPC", "pickup-probe-rpc");
-    if (ui->button_enabled(ui->user, anomaly::sdk::StringView(rpc_label), 0.0F, 0.0F, 1) !=
-        0) {
+    // One button per pickup implementation BoxAuto reaches for, plus the container call
+    // PinkPawHeistESP uses, so a press says which mechanism the game actually honours. The
+    // labels are literal calls so the localization check can see every key in use.
+    const std::string server_label = context->localizer.Label(
+        "action.server", "ServerInteract(actor)", "pickup-probe-server");
+    if (ui->button_enabled(
+            ui->user, anomaly::sdk::StringView(server_label), 0.0F, 0.0F, 1) != 0) {
         std::scoped_lock lock(context->mutex);
-        context->pending = Action::rpc;
+        context->pending = Action::server_interact;
+    }
+    const std::string trigger_label = context->localizer.Label(
+        "action.trigger", "TriggerInteract(entry)", "pickup-probe-trigger");
+    if (ui->button_enabled(
+            ui->user, anomaly::sdk::StringView(trigger_label), 0.0F, 0.0F, 1) != 0) {
+        std::scoped_lock lock(context->mutex);
+        context->pending = Action::trigger_interact;
+    }
+    const std::string pickup_label = context->localizer.Label(
+        "action.pickup", "Host pickup (food boxes)", "pickup-probe-pickup");
+    if (ui->button_enabled(
+            ui->user, anomaly::sdk::StringView(pickup_label), 0.0F, 0.0F, 1) != 0) {
+        std::scoped_lock lock(context->mutex);
+        context->pending = Action::host_pickup;
     }
     const std::string vtable_label = context->localizer.Label(
         "action.vtable", "Direct vtable call", "pickup-probe-vtable");
@@ -1207,7 +1416,8 @@ void ANOMALY_CALL Draw(void* user, const AnomalyUiServiceV1* supplied_ui) {
     ui->separator(ui->user);
     if (report.empty()) {
         const std::string idle = context->localizer.Text(
-            "status.idle", "Idle. A press scans GObjects and calls on the game thread.");
+            "status.idle",
+            "Idle. Stand next to a box, then press the method you want to test.");
         ui->text(ui->user, anomaly::sdk::StringView(idle));
     }
     for (const auto& line : report) {
