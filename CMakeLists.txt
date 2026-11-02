@@ -1477,6 +1477,11 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         MANIFEST plugins/MapSpawnExporter/manifest.json
         PACKAGE_NAME MapSpawnExporter
         OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/MapSpawnExporter")
+    anomaly_add_plugin(anomaly_builtin_box_pickup_probe TEST_PLUGIN
+        SOURCES plugins/BoxPickupProbe/plugin.cpp
+        MANIFEST plugins/BoxPickupProbe/manifest.json
+        PACKAGE_NAME BoxPickupProbe
+        OUTPUT_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/builtin-plugins/BoxPickupProbe")
     anomaly_add_plugin(anomaly_builtin_wallet_collector
         SOURCES plugins/WalletCollector/plugin.cpp
         MANIFEST plugins/WalletCollector/manifest.json
@@ -1753,7 +1758,8 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
             anomaly_builtin_nte_movement_hold
             anomaly_builtin_nte_navigation anomaly_builtin_nte_pickup_demo
             anomaly_builtin_teleport_landmarks_probe
-            anomaly_builtin_map_spawn_exporter)
+            anomaly_builtin_map_spawn_exporter
+            anomaly_builtin_box_pickup_probe)
     endif()
     foreach(builtin_target IN LISTS ANOMALY_BUILTIN_PLUGIN_TARGETS)
         target_include_directories(${builtin_target} PRIVATE "${CMAKE_SOURCE_DIR}")
@@ -1777,6 +1783,7 @@ if(ANOMALY_BUILD_BUILTIN_PLUGINS)
         target_compile_options(anomaly_builtin_night999 PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_npc_summon PRIVATE /utf-8)
         target_compile_options(anomaly_builtin_nailong PRIVATE /utf-8)
+        target_compile_options(anomaly_builtin_box_pickup_probe PRIVATE /utf-8)
     endif()
     add_dependencies(anomaly_test_host ${ANOMALY_BUILTIN_PLUGIN_TARGETS})
     if(TARGET anomaly-platform-preview)
@@ -1825,6 +1832,8 @@ anomaly_stage_platform_preview_plugin(
     anomaly_builtin_map_spawn_exporter MapSpawnExporter)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_wallet_collector WalletCollector)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_box_auto BoxAuto)
+anomaly_stage_platform_preview_plugin(
+    anomaly_builtin_box_pickup_probe BoxPickupProbe)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_combat_box CombatBox)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_clone_enter CloneEnter)
 anomaly_stage_platform_preview_plugin(anomaly_builtin_scene_loader SceneLoader)
