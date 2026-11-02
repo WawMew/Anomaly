@@ -8,6 +8,7 @@
     "action.vtable": "直接虚调用拾取",
     "status.idle": "空闲。按下任一按钮会在 Game 线程扫描并调用。",
     "status.scan": "扫描 {0} 个对象，命中 {1} 个候选",
+    "status.scanning": "正在扫描 {0} / {1} 个对象",
     "status.rpc": "RPC：已发送 {0}，未发送 {1}",
     "status.vtable": "虚调用：尝试 {0}，返回 true {1}，返回 false {2}，无接口 {3}",
     "status.interface": "首个接口：{0} 位于 {1} 槽位 {2}",

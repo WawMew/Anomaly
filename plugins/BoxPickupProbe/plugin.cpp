@@ -79,6 +79,9 @@ constexpr std::size_t kInterfaceScanBytes = 0x1000;
 constexpr std::size_t kInterfaceReadChunk = 256;
 constexpr std::size_t kInterfaceVtableSlots = 32;
 constexpr std::size_t kMinimumPointerValue = 0x10000;
+// A full GObjects walk is far too long for one game-thread tick, so a scan advances by
+// this many objects per update.
+constexpr std::int32_t kScanBatchSize = 8192;
 
 // Class-name fragments the resource boxes are instantiated under. This is the same set
 // BoxAuto classifies table rows with, minus every coordinate concern.
@@ -87,6 +90,23 @@ constexpr std::array<std::string_view, 10> kLootClassPrefixes{
     "PropBox_Yahaha", "PropBox_Once", "Prison", "InteractBox", "ShopStealGoods_"};
 
 enum class Action : std::uint32_t { none = 0, rpc = 1, vtable = 2 };
+
+struct Candidate final {
+    std::uintptr_t actor{};
+    std::string class_name;
+};
+
+struct ScanResult final {
+    std::uintptr_t g_objects{};
+    std::int32_t object_count{};
+    std::int32_t cursor{};
+    std::vector<Candidate> candidates;
+};
+
+struct InterfaceHit final {
+    std::uintptr_t offset{};
+    std::uint32_t slot{};
+};
 
 struct Context final {
     const AnomalyHostApiV1* host{};
@@ -101,24 +121,12 @@ struct Context final {
     std::uintptr_t server_interact{};
     std::uintptr_t pickup_function{};
     bool started{};
+    // `pending` is the render-to-game handoff; `running` and `scan` belong to Update alone.
     Action pending{Action::none};
+    Action running{Action::none};
+    ScanResult scan;
     std::vector<std::string> report;
     std::mutex mutex;
-};
-
-struct Candidate final {
-    std::uintptr_t actor{};
-    std::string class_name;
-};
-
-struct ScanResult final {
-    std::int32_t object_count{};
-    std::vector<Candidate> candidates;
-};
-
-struct InterfaceHit final {
-    std::uintptr_t offset{};
-    std::uint32_t slot{};
 };
 
 AnomalyStatusV1 Status(
@@ -428,7 +436,10 @@ bool MatchesLootClass(const std::string_view class_name) noexcept {
     return false;
 }
 
-bool ScanObjects(Context& context, ScanResult& result) {
+// Resolves the registry head and the object count, then leaves the cursor at zero so
+// `StepScan` can walk it in bounded batches.
+bool BeginScan(Context& context) {
+    context.scan = ScanResult{};
     if (context.g_objects_address == 0 &&
         !ResolveRip(context, kGObjectsPattern, kGObjectsAddend,
                     context.g_objects_address)) {
@@ -442,11 +453,23 @@ bool ScanObjects(Context& context, ScanResult& result) {
     if (!Read(context, g_objects + kObjectCountOffset, count) || count <= 0) {
         return false;
     }
-    result.object_count = count;
-    for (std::int32_t index = 0; index < count; ++index) {
-        if (result.candidates.size() >= kMaximumCandidates) break;
+    context.scan.g_objects = g_objects;
+    context.scan.object_count = count;
+    return true;
+}
+
+// Returns true once the walk is complete.
+bool StepScan(Context& context) {
+    ScanResult& scan = context.scan;
+    const std::int32_t end =
+        std::min(scan.object_count, scan.cursor + kScanBatchSize);
+    for (; scan.cursor < end; ++scan.cursor) {
+        if (scan.candidates.size() >= kMaximumCandidates) {
+            scan.cursor = scan.object_count;
+            break;
+        }
         const auto object =
-            ObjectAt(context, g_objects, static_cast<std::uint32_t>(index));
+            ObjectAt(context, scan.g_objects, static_cast<std::uint32_t>(scan.cursor));
         if (object == 0) continue;
         std::uintptr_t cls{};
         if (!Read(context, object + kObjectClassOffset, cls) || cls == 0) continue;
@@ -456,9 +479,9 @@ bool ScanObjects(Context& context, ScanResult& result) {
         }
         std::string class_name = ObjectName(context, cls);
         if (class_name.empty() || !MatchesLootClass(class_name)) continue;
-        result.candidates.push_back({object, std::move(class_name)});
+        scan.candidates.push_back({object, std::move(class_name)});
     }
-    return true;
+    return scan.cursor >= scan.object_count;
 }
 
 // The interface subobject is found rather than assumed: scan the actor for a pointer
@@ -514,39 +537,42 @@ std::array<std::string_view, N> Views(const std::array<std::string, N>& values) 
     return views;
 }
 
-void AddReportLine(Context& context, std::string line) {
-    context.report.push_back(std::move(line));
+void AddReportLine(std::vector<std::string>& out, std::string line) {
+    out.push_back(std::move(line));
 }
 
-void AddError(Context& context, const std::string_view code, const std::string& detail) {
+void AddError(
+    Context& context,
+    std::vector<std::string>& out,
+    const std::string_view code,
+    const std::string& detail) {
     const std::array arguments{code, std::string_view(detail)};
-    AddReportLine(context, context.localizer.Format(
-        "status.error", "{0} - {1}", arguments));
+    AddReportLine(out, context.localizer.Format("status.error", "{0} - {1}", arguments));
 }
 
-void AddScanLine(Context& context, const ScanResult& scan) {
+void AddScanLine(
+    Context& context,
+    std::vector<std::string>& out,
+    const ScanResult& scan) {
     const std::array<std::string, 2> arguments{
         std::to_string(scan.object_count),
         std::to_string(scan.candidates.size())};
-    AddReportLine(context, context.localizer.Format(
+    AddReportLine(out, context.localizer.Format(
         "status.scan", "Scanned {0} objects, matched {1} candidates", Views(arguments)));
 }
 
-void RunRpc(Context& context) {
-    ScanResult scan;
-    if (!ScanObjects(context, scan)) {
-        AddError(context, "SCAN", "GObjects");
-        return;
-    }
-    AddScanLine(context, scan);
+void RunRpc(
+    Context& context,
+    const ScanResult& scan,
+    std::vector<std::string>& out) {
+    AddScanLine(context, out, scan);
     if (scan.candidates.empty()) {
         AddReportLine(
-            context,
-            context.localizer.Text("status.no_candidates", "No candidate objects"));
+            out, context.localizer.Text("status.no_candidates", "No candidate objects"));
         return;
     }
     if (!GetController(context)) {
-        AddError(context, "PROFILE", "ServerInteract");
+        AddError(context, out, "PROFILE", "ServerInteract");
         return;
     }
     std::size_t sent{};
@@ -563,29 +589,26 @@ void RunRpc(Context& context) {
         }
     }
     const std::array<std::string, 2> arguments{std::to_string(sent), std::to_string(failed)};
-    AddReportLine(context, context.localizer.Format(
+    AddReportLine(out, context.localizer.Format(
         "status.rpc", "RPC: sent {0}, not sent {1}", Views(arguments)));
 }
 
-void RunVtable(Context& context) {
-    ScanResult scan;
-    if (!ScanObjects(context, scan)) {
-        AddError(context, "SCAN", "GObjects");
-        return;
-    }
-    AddScanLine(context, scan);
+void RunVtable(
+    Context& context,
+    const ScanResult& scan,
+    std::vector<std::string>& out) {
+    AddScanLine(context, out, scan);
     if (scan.candidates.empty()) {
         AddReportLine(
-            context,
-            context.localizer.Text("status.no_candidates", "No candidate objects"));
+            out, context.localizer.Text("status.no_candidates", "No candidate objects"));
         return;
     }
     if (!ResolvePickupFunction(context)) {
-        AddError(context, "SIGNATURE", "pickup");
+        AddError(context, out, "SIGNATURE", "pickup");
         return;
     }
     if (!GetController(context)) {
-        AddError(context, "PROFILE", "ServerInteract");
+        AddError(context, out, "PROFILE", "ServerInteract");
         return;
     }
     std::size_t tried{};
@@ -622,10 +645,10 @@ void RunVtable(Context& context) {
     const std::array<std::string, 4> arguments{
         std::to_string(tried), std::to_string(accepted), std::to_string(rejected),
         std::to_string(missing)};
-    AddReportLine(context, context.localizer.Format(
+    AddReportLine(out, context.localizer.Format(
         "status.vtable", "Vtable: tried {0}, true {1}, false {2}, no interface {3}",
         Views(arguments)));
-    if (!first_hit.empty()) AddReportLine(context, std::move(first_hit));
+    if (!first_hit.empty()) AddReportLine(out, std::move(first_hit));
 }
 
 bool UiReady(const AnomalyUiServiceV1* service) noexcept {
@@ -692,6 +715,8 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void* user, std::uint32_t) {
     std::scoped_lock lock(context->mutex);
     context->started = false;
     context->pending = Action::none;
+    context->running = Action::none;
+    context->scan = ScanResult{};
     return anomaly::sdk::Ok();
 }
 
@@ -700,26 +725,54 @@ void ANOMALY_CALL Unload(void* user) {
 }
 
 // on_update runs on the Game domain, which is where both calls belong: ProcessEvent and
-// the interface entry both assume the game thread.
+// the interface entry both assume the game thread. A press starts a batched object walk
+// that keeps advancing across frames, so no single tick stalls the game.
 void ANOMALY_CALL Update(void* user, double) {
     auto* context = static_cast<Context*>(user);
     if (context == nullptr) return;
-    Action action{Action::none};
+    Action running{Action::none};
     {
         std::scoped_lock lock(context->mutex);
-        if (!context->started || context->pending == Action::none) return;
-        action = context->pending;
-        context->pending = Action::none;
+        if (!context->started) return;
+        if (context->running == Action::none) {
+            if (context->pending == Action::none) return;
+            context->running = context->pending;
+            context->pending = Action::none;
+            context->report.clear();
+            if (!BeginScan(*context)) {
+                std::vector<std::string> failure;
+                AddError(*context, failure, "SCAN", "GObjects");
+                context->running = Action::none;
+                context->report = std::move(failure);
+                return;
+            }
+        }
+        running = context->running;
+    }
+    // `scan` and `running` are only touched here, on the game thread.
+    if (!StepScan(*context)) {
+        const std::array<std::string, 2> arguments{
+            std::to_string(context->scan.cursor),
+            std::to_string(context->scan.object_count)};
+        const std::string progress = context->localizer.Format(
+            "status.scanning", "Scanning {0}/{1} objects", Views(arguments));
+        std::scoped_lock lock(context->mutex);
         context->report.clear();
+        context->report.push_back(progress);
+        return;
     }
-    if (action == Action::rpc) {
-        RunRpc(*context);
-    } else if (action == Action::vtable) {
-        RunVtable(*context);
+    std::vector<std::string> out;
+    if (running == Action::rpc) {
+        RunRpc(*context, context->scan, out);
+    } else {
+        RunVtable(*context, context->scan, out);
     }
-    if (context->report.empty()) {
-        AddError(*context, "PROBE", "no report");
+    if (out.empty()) {
+        AddError(*context, out, "PROBE", "no report");
     }
+    std::scoped_lock lock(context->mutex);
+    context->running = Action::none;
+    context->report = std::move(out);
 }
 
 void ANOMALY_CALL Draw(void* user, const AnomalyUiServiceV1* supplied_ui) {
