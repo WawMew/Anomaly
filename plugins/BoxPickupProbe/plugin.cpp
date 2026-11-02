@@ -71,8 +71,6 @@ constexpr std::ptrdiff_t kObjectCountOffset = 36;
 constexpr std::ptrdiff_t kObjectNumChunksOffset = 44;
 constexpr std::uint32_t kObjectChunkSize = 65536;
 constexpr std::uint32_t kObjectItemStride = 24;
-constexpr std::ptrdiff_t kUClassClassDefaultObjectOffset = 272;
-constexpr std::ptrdiff_t kActorRootComponentOffset = 456;
 constexpr std::ptrdiff_t kUStructChildrenOffset = 72;
 constexpr std::ptrdiff_t kUStructSuperStructOffset = 64;
 constexpr std::ptrdiff_t kUFieldNextOffset = 40;
@@ -112,14 +110,13 @@ constexpr std::ptrdiff_t kInteractFinishOffset = 976;
 constexpr auto kVerifyDelay = std::chrono::milliseconds(3000);
 
 constexpr std::size_t kMaximumNameBytes = 1024;
-constexpr std::size_t kMaximumCandidates = 128;
+constexpr std::size_t kMaximumCandidates = 64;
 constexpr std::size_t kInterfaceScanBytes = 0x1000;
 constexpr std::size_t kInterfaceReadChunk = 256;
 constexpr std::size_t kInterfaceVtableSlots = 32;
 constexpr std::size_t kMinimumPointerValue = 0x10000;
-// A full GObjects walk is far too long for one game-thread tick, so a scan advances by
-// this many objects per update.
-constexpr std::int32_t kScanBatchSize = 8192;
+// The Host serves the entity frame in pages of at most this many entities.
+constexpr std::size_t kEntityPageCapacity = ANOMALY_NTE_ENTITY_PAGE_V1_MAX_CAPACITY;
 
 // Class-name fragments the resource boxes are instantiated under. This is the same set
 // BoxAuto classifies table rows with, minus every coordinate concern.
@@ -136,8 +133,7 @@ struct Candidate final {
 
 struct ScanResult final {
     std::uintptr_t g_objects{};
-    std::int32_t object_count{};
-    std::int32_t cursor{};
+    std::uint64_t entity_count{};
     std::vector<Candidate> candidates;
 };
 
@@ -162,6 +158,7 @@ struct Context final {
     const AnomalyUiServiceV1* ui{};
     const AnomalySignatureServiceV1* signature{};
     const AnomalyUe5NamesServiceV1* names{};
+    const AnomalyNteEntitiesServiceV1* entities{};
     std::uintptr_t g_objects_address{};
     std::uintptr_t g_world_address{};
     std::uintptr_t controller{};
@@ -175,6 +172,7 @@ struct Context final {
     Action running{Action::none};
     ScanResult scan;
     VerifyState verify;
+    std::vector<std::pair<std::uint64_t, std::string>> entity_class_names;
     std::vector<std::pair<std::uintptr_t, std::ptrdiff_t>> interact_finish_offsets;
     std::vector<std::string> report;
     std::mutex mutex;
@@ -647,60 +645,94 @@ bool MatchesLootClass(const std::string_view class_name) noexcept {
     return false;
 }
 
-// Resolves the registry head and the object count, then leaves the cursor at zero so
-// `StepScan` can walk it in bounded batches.
-bool BeginScan(Context& context) {
+// Class names arrive per entity class id; the frame repeats them, so they are cached.
+const std::string& EntityClassName(Context& context, const std::uint64_t class_id) {
+    static const std::string empty;
+    for (const auto& entry : context.entity_class_names) {
+        if (entry.first == class_id) return entry.second;
+    }
+    const auto* service = context.entities;
+    if (service == nullptr || service->class_name_utf8 == nullptr) return empty;
+    std::size_t size{};
+    if (service->class_name_utf8(service->user, class_id, nullptr, &size).code !=
+            ANOMALY_STATUS_V1_OK ||
+        size <= 1 || size > kMaximumNameBytes) {
+        context.entity_class_names.emplace_back(class_id, std::string{});
+        return context.entity_class_names.back().second;
+    }
+    std::string name(size, '\0');
+    if (service->class_name_utf8(service->user, class_id, name.data(), &size).code !=
+        ANOMALY_STATUS_V1_OK) {
+        context.entity_class_names.emplace_back(class_id, std::string{});
+        return context.entity_class_names.back().second;
+    }
+    if (const void* terminator = std::memchr(name.data(), '\0', name.size());
+        terminator != nullptr) {
+        name.resize(static_cast<const char*>(terminator) - name.data());
+    }
+    context.entity_class_names.emplace_back(class_id, std::move(name));
+    return context.entity_class_names.back().second;
+}
+
+// Target acquisition, the way PinkPawHeistESP does it: page the Host's entity frame and keep
+// the loot actors it already knows about. No GObjects walk - each match costs one object
+// lookup, so a press stays cheap on the game thread.
+bool CollectTargets(Context& context) {
     context.scan = ScanResult{};
+    const auto* service = context.entities;
+    if (service == nullptr || service->frame == nullptr || service->page == nullptr ||
+        service->class_name_utf8 == nullptr) {
+        Log(context, "probe entity service unavailable");
+        return false;
+    }
     if (context.g_objects_address == 0 &&
         !ResolveRip(
             context, kGObjectsPattern, kGObjectsAddend, context.g_objects_address)) {
         Log(context, "probe resolve GObjects failed");
         return false;
     }
-    // The resolved address is the registry itself: BoxAuto and PinkPawHeistESP both index it
-    // directly (items +16, count +36, chunks +44) instead of dereferencing it first.
-    std::int32_t count{};
-    if (!Read(context, context.g_objects_address + kObjectCountOffset, count) ||
-        count <= 0) {
-        Log(
-            context, "probe object count unreadable slot=" + Hex(context.g_objects_address) +
-                         " count=" + std::to_string(count));
+    AnomalyNteEntityFrameV1 frame{sizeof(frame)};
+    if (service->frame(service->user, &frame).code != ANOMALY_STATUS_V1_OK ||
+        frame.generation == 0 || frame.entity_count == 0) {
+        Log(context, "probe entity frame unavailable");
         return false;
     }
     context.scan.g_objects = context.g_objects_address;
-    context.scan.object_count = count;
-    return true;
-}
-
-// Returns true once the walk is complete.
-bool StepScan(Context& context) {
-    ScanResult& scan = context.scan;
-    const std::int32_t end =
-        std::min(scan.object_count, scan.cursor + kScanBatchSize);
-    for (; scan.cursor < end; ++scan.cursor) {
-        if (scan.candidates.size() >= kMaximumCandidates) {
-            scan.cursor = scan.object_count;
+    context.scan.entity_count = frame.entity_count;
+    std::array<AnomalyNteEntitySnapshotV1, kEntityPageCapacity> page{};
+    std::uint32_t offset{};
+    while (offset < frame.entity_count && context.scan.candidates.size() < kMaximumCandidates) {
+        for (auto& snapshot : page) snapshot = AnomalyNteEntitySnapshotV1{sizeof(snapshot)};
+        AnomalyNteEntityPageRequestV1 request{};
+        request.struct_size = sizeof(request);
+        request.generation = frame.generation;
+        request.offset = offset;
+        request.capacity = static_cast<std::uint32_t>(page.size());
+        AnomalyNteEntityPageResultV1 result{sizeof(result)};
+        if (service->page(service->user, &request, page.data(), &result).code !=
+                ANOMALY_STATUS_V1_OK ||
+            result.generation != frame.generation || result.returned == 0) {
             break;
         }
-        const auto object =
-            ObjectAt(context, scan.g_objects, static_cast<std::uint32_t>(scan.cursor));
-        if (object == 0) continue;
-        std::uintptr_t cls{};
-        if (!Read(context, object + kObjectClassOffset, cls) || cls == 0) continue;
-        std::uintptr_t cdo{};
-        if (Read(context, cls + kUClassClassDefaultObjectOffset, cdo) && cdo == object) {
-            continue;
+        for (std::uint32_t index{}; index < result.returned; ++index) {
+            const auto& snapshot = page[index];
+            if ((snapshot.flags & ANOMALY_NTE_SNAPSHOT_V1_VALID) == 0 ||
+                snapshot.entity_id == 0) {
+                continue;
+            }
+            const std::string& class_name = EntityClassName(context, snapshot.class_id);
+            if (class_name.empty() || !MatchesLootClass(class_name)) continue;
+            if (context.scan.candidates.size() >= kMaximumCandidates) break;
+            // Entity id is the Host object index plus one, so this is a single slot lookup.
+            const auto actor = ObjectAt(
+                context, context.g_objects_address,
+                static_cast<std::uint32_t>(snapshot.entity_id - 1U));
+            if (actor == 0) continue;
+            context.scan.candidates.push_back({actor, class_name});
         }
-        std::string class_name = ObjectName(context, cls);
-        if (class_name.empty() || !MatchesLootClass(class_name)) continue;
-        // Data assets and other non-actors can carry a matching substring in their class
-        // name; only real placed actors have a root component.
-        if (class_name.find("DataAsset") != std::string::npos) continue;
-        std::uintptr_t root{};
-        if (!Read(context, object + kActorRootComponentOffset, root) || root == 0) continue;
-        scan.candidates.push_back({object, std::move(class_name)});
+        offset = result.next_offset > offset ? result.next_offset : offset + result.returned;
     }
-    return scan.cursor >= scan.object_count;
+    return true;
 }
 
 // The interface subobject is found rather than assumed: scan the actor for a pointer
@@ -762,10 +794,10 @@ void AddScanLine(
     std::vector<std::string>& out,
     const ScanResult& scan) {
     const std::array<std::string, 2> arguments{
-        std::to_string(scan.object_count),
+        std::to_string(scan.entity_count),
         std::to_string(scan.candidates.size())};
     AddReportLine(out, context.localizer.Format(
-        "status.scan", "Scanned {0} objects, matched {1} candidates", Views(arguments)));
+        "status.scan", "Entities {0}, loot targets {1}", Views(arguments)));
 }
 
 // Read-only pass over the class filter, run once when the plugin loads: it calls no BP
@@ -837,14 +869,7 @@ void RunRpc(
             FindFunction(context, cls, "BPCanTryInteract", 3, 13, can_try_fn);
         const bool has_choices =
             has_fns && ReadInteractChoices(context, actor, entries_fn, choices);
-        if (logged < 4) {
-            Log(
-                context, "probe candidate class=" + candidate.class_name + " actor=" +
-                             Hex(actor) + " entries=" +
-                             (has_fns ? std::to_string(choices.size())
-                                      : std::string("no-functions")));
-            ++logged;
-        }
+        std::string arming = has_fns ? std::to_string(choices.size()) : "no-functions";
         if (has_choices && !choices.empty()) {
             ++armed;
             bool triggered{};
@@ -855,6 +880,7 @@ void RunRpc(
                     continue;
                 }
                 ++can_try_total;
+                if (arming.find("can_try") == std::string::npos) arming += " can_try=1";
                 if (context.trigger_interact == 0) continue;
                 std::uint8_t params[kTriggerInteractParams]{};
                 std::memcpy(params + 0, &actor, sizeof(actor));
@@ -867,13 +893,25 @@ void RunRpc(
                     break;
                 }
             }
+            if (arming.find("can_try") == std::string::npos) arming += " can_try=0";
             if (triggered) {
                 ++fired;
+                Log(
+                    context, "probe candidate class=" + candidate.class_name + " actor=" +
+                                 Hex(actor) + " entries=" + arming + " path=trigger");
                 BeginVerify(context, actor, cls, candidate.class_name);
                 break;
             }
-            continue;
         }
+        if (logged < 4) {
+            Log(
+                context, "probe candidate class=" + candidate.class_name + " actor=" +
+                             Hex(actor) + " entries=" + arming);
+            ++logged;
+        }
+        // BoxAuto opens every resource box through ServerInteract; the entry chain above only
+        // arms what the game already considers interactable, so it is the fallback rather
+        // than the other way around.
         if (context.server_interact == 0) continue;
         std::uint8_t params[12]{};
         std::memcpy(params, &actor, sizeof(actor));
@@ -881,6 +919,9 @@ void RunRpc(
                 context, reinterpret_cast<void*>(context.controller),
                 reinterpret_cast<void*>(context.server_interact), params)) {
             ++fired;
+            Log(
+                context, "probe candidate class=" + candidate.class_name + " actor=" +
+                             Hex(actor) + " entries=" + arming + " path=server-interact");
             BeginVerify(context, actor, cls, candidate.class_name);
             break;
         }
@@ -985,14 +1026,14 @@ void CompleteVerify(Context& context) {
     std::uint8_t current{};
     const bool read =
         Read(context, actor + InteractFinishOffset(context, cls), current);
-    const bool alive = IsObjectAlive(context, context.scan.g_objects, actor);
+    const bool alive = IsObjectAlive(context, context.g_objects_address, actor);
     const bool opened = (read && current != baseline) || !alive;
+    const std::string verdict =
+        opened ? context.localizer.Text("verify.opened", "opened")
+               : context.localizer.Text("verify.unchanged", "unchanged");
     const std::array<std::string, 4> arguments{
         std::to_string(baseline), read ? std::to_string(current) : std::string("n/a"),
-        alive ? std::string("1") : std::string("0"),
-        context.localizer.Text(
-            opened ? "verify.opened" : "verify.unchanged",
-            opened ? "opened" : "unchanged")};
+        alive ? std::string("1") : std::string("0"), verdict};
     const std::string line = context.localizer.Format(
         "status.verify",
         "After 3s: bInteractFinish {0} -> {1}, alive {2}, verdict {3}",
@@ -1046,6 +1087,8 @@ AnomalyStatusV1 ANOMALY_CALL Load(
     // resolve_utf8 is part of names v1; find_utf8 (v2) is not needed here.
     context->names = Query<AnomalyUe5NamesServiceV1>(
         host, ANOMALY_UE5_NAMES_SERVICE_V1_ID, 1);
+    context->entities = Query<AnomalyNteEntitiesServiceV1>(
+        host, ANOMALY_NTE_ENTITIES_SERVICE_V1_ID, ANOMALY_NTE_ENTITIES_SERVICE_V1_VERSION);
     if (!UiReady(context->ui) || !MemoryReady(context->core) ||
         context->signature == nullptr || context->signature->resolve == nullptr ||
         !NamesReady(context->names)) {
@@ -1084,53 +1127,39 @@ void ANOMALY_CALL Unload(void* user) {
 }
 
 // on_update runs on the Game domain, which is where both calls belong: ProcessEvent and
-// the interface entry both assume the game thread. A press starts a batched object walk
-// that keeps advancing across frames, so no single tick stalls the game.
+// the interface entry both assume the game thread.
 void ANOMALY_CALL Update(void* user, double) {
     auto* context = static_cast<Context*>(user);
     if (context == nullptr) return;
     {
         std::scoped_lock lock(context->mutex);
         if (!context->started) return;
+        if (context->running == Action::none) {
+            if (context->pending == Action::none) return;
+            context->running = context->pending;
+            context->pending = Action::none;
+            context->report.clear();
+        }
     }
     // The post-interact check reads the box on the game thread, like the call it follows.
     CompleteVerify(*context);
     Action running{Action::none};
     {
         std::scoped_lock lock(context->mutex);
-        if (context->running == Action::none) {
-            if (context->pending == Action::none) return;
-            context->running = context->pending;
-            context->pending = Action::none;
-            context->report.clear();
-            if (!BeginScan(*context)) {
-                std::vector<std::string> failure;
-                AddError(*context, failure, "SCAN", "GObjects");
-                context->running = Action::none;
-                context->report = std::move(failure);
-                Log(*context, "probe begin-scan failed");
-                return;
-            }
-            Log(*context, "probe scan start objects=" + std::to_string(context->scan.object_count));
-        }
         running = context->running;
     }
-    // `scan` and `running` are only touched here, on the game thread.
-    if (!StepScan(*context)) {
-        const std::array<std::string, 2> arguments{
-            std::to_string(context->scan.cursor),
-            std::to_string(context->scan.object_count)};
-        const std::string progress = context->localizer.Format(
-            "status.scanning", "Scanning {0}/{1} objects", Views(arguments));
+    std::vector<std::string> out;
+    if (!CollectTargets(*context)) {
+        AddError(*context, out, "ENTITIES", "entity frame");
+        Log(*context, "probe collect targets failed");
         std::scoped_lock lock(context->mutex);
-        context->report.clear();
-        context->report.push_back(progress);
+        context->running = Action::none;
+        context->report = std::move(out);
         return;
     }
-    std::vector<std::string> out;
     Log(
-        *context, "probe scan objects=" + std::to_string(context->scan.object_count) +
-                      " candidates=" + std::to_string(context->scan.candidates.size()) +
+        *context, "probe collect entities=" + std::to_string(context->scan.entity_count) +
+                      " targets=" + std::to_string(context->scan.candidates.size()) +
                       " action=" + std::to_string(static_cast<int>(running)));
     if (running == Action::rpc) {
         RunRpc(*context, context->scan, out);
