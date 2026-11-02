@@ -1,10 +1,18 @@
 // Temporary probe: compares the two pickup mechanisms covered by this analysis.
 //
-//   * interaction RPC - what BoxAuto does: UPlayerController::ServerInteract(actor, 0)
-//     dispatched through ProcessEvent.
+//   * interaction RPC - what BoxAuto does, in the order it does it: arm the entry through
+//     the actor's BPGetInteractEntries / BPCanTryInteract, fire it with the controller's
+//     TriggerInteract(actor, choice, 0), and fall back to ServerInteract(actor, 0) when the
+//     actor offers no entry at all. Both are dispatched through ProcessEvent.
 //   * direct vtable call - what PinkPawHeistESP does: resolve the pickup entry by
-//     signature, locate the interface subobject that carries it, call it with the local
-//     controller.
+//     signature, read the container interface vtable stored at actor+872, check slot 3
+//     still holds that entry, then call it with the local controller.
+//
+// Neither plugin calls these from a distance and hopes: BoxAuto moves the player inside
+// 250cm (120cm in developer mode) before every interact and then verifies the box's
+// bInteractFinish byte three seconds later, and PinkPawHeistESP only calls containers whose
+// pickability it has already checked. This probe keeps the same verification so a press
+// reports what the game actually did instead of what dispatch returned.
 //
 // It deliberately does no coordinate work, no teleporting and no table reading: the
 // candidate set is every GObject whose class name carries one of the loot-box prefixes.
@@ -15,6 +23,7 @@
 #include <Windows.h>
 
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -63,6 +72,7 @@ constexpr std::ptrdiff_t kObjectNumChunksOffset = 44;
 constexpr std::uint32_t kObjectChunkSize = 65536;
 constexpr std::uint32_t kObjectItemStride = 24;
 constexpr std::ptrdiff_t kUClassClassDefaultObjectOffset = 272;
+constexpr std::ptrdiff_t kActorRootComponentOffset = 456;
 constexpr std::ptrdiff_t kUStructChildrenOffset = 72;
 constexpr std::ptrdiff_t kUStructSuperStructOffset = 64;
 constexpr std::ptrdiff_t kUFieldNextOffset = 40;
@@ -73,8 +83,36 @@ constexpr std::ptrdiff_t kWorldGameInstanceOffset = 560;
 constexpr std::ptrdiff_t kGameInstanceLocalPlayersOffset = 56;
 constexpr std::ptrdiff_t kLocalPlayerControllerOffset = 48;
 
+// Reflection offsets needed for the interact precondition and for the box-state check.
+constexpr std::ptrdiff_t kObjectInternalIndexOffset = 12;
+constexpr std::ptrdiff_t kUStructPropertyLinkOffset = 112;
+constexpr std::ptrdiff_t kFFieldNameOffset = 32;
+constexpr std::ptrdiff_t kFPropertyLinkNextOffset = 72;
+constexpr std::ptrdiff_t kFPropertyOffsetInternalOffset = 68;
+constexpr std::ptrdiff_t kUFunctionFlagsOffset = 176;
+constexpr std::uint32_t kFuncNativeFlag = 0x400;
+
+// BoxAuto's interact contract: BPGetInteractEntries(controller, out TArray<int32>) on the
+// actor returns 360-byte elements whose first int32 is the choice, BPCanTryInteract
+// (controller, choice) reports a byte, and TriggerInteract(actor, choice, 0) performs it.
+constexpr std::size_t kInteractEntriesParams = 24;
+constexpr std::size_t kCanTryParams = 13;
+constexpr std::size_t kTriggerInteractParams = 13;
+constexpr std::uintptr_t kInteractArrayStride = 360;
+constexpr std::int32_t kMaximumInteractEntries = 128;
+
+// PinkPawHeistESP's container interface: the vtable pointer sits at actor+872 and the
+// pickup entry is virtual slot 3 (byte offset 24).
+constexpr std::uintptr_t kPinkPawInterfaceOffset = 872;
+constexpr std::uint32_t kPinkPawPickupSlot = 3;
+
+// `bInteractFinish` moved from 976 to 984 in the 9/26 build; resolve it by name and keep
+// the old offset as the fallback, the way BoxAuto does.
+constexpr std::ptrdiff_t kInteractFinishOffset = 976;
+constexpr auto kVerifyDelay = std::chrono::milliseconds(3000);
+
 constexpr std::size_t kMaximumNameBytes = 1024;
-constexpr std::size_t kMaximumCandidates = 16;
+constexpr std::size_t kMaximumCandidates = 128;
 constexpr std::size_t kInterfaceScanBytes = 0x1000;
 constexpr std::size_t kInterfaceReadChunk = 256;
 constexpr std::size_t kInterfaceVtableSlots = 32;
@@ -89,7 +127,7 @@ constexpr std::array<std::string_view, 10> kLootClassPrefixes{
     "HunterBox_", "CharacterUpBox_", "ChameleonBox", "FurnitureBox", "PropBox_Geft",
     "PropBox_Yahaha", "PropBox_Once", "Prison", "InteractBox", "ShopStealGoods_"};
 
-enum class Action : std::uint32_t { none = 0, rpc = 1, vtable = 2 };
+enum class Action : std::uint32_t { none = 0, rpc = 1, vtable = 2, diagnostic = 3 };
 
 struct Candidate final {
     std::uintptr_t actor{};
@@ -108,6 +146,15 @@ struct InterfaceHit final {
     std::uint32_t slot{};
 };
 
+// One pending post-interact check: the byte read before the call and the moment the game
+// has had time to act on it.
+struct VerifyState final {
+    bool active{};
+    std::uintptr_t actor{};
+    std::uint8_t baseline{};
+    std::chrono::steady_clock::time_point due{};
+};
+
 struct Context final {
     const AnomalyHostApiV1* host{};
     anomaly::sdk::Localizer localizer;
@@ -119,12 +166,16 @@ struct Context final {
     std::uintptr_t g_world_address{};
     std::uintptr_t controller{};
     std::uintptr_t server_interact{};
+    std::uintptr_t trigger_interact{};
     std::uintptr_t pickup_function{};
     bool started{};
-    // `pending` is the render-to-game handoff; `running` and `scan` belong to Update alone.
+    // `pending` is the render-to-game handoff; `running`, `scan` and `verify` belong to
+    // Update alone.
     Action pending{Action::none};
     Action running{Action::none};
     ScanResult scan;
+    VerifyState verify;
+    std::vector<std::pair<std::uintptr_t, std::ptrdiff_t>> interact_finish_offsets;
     std::vector<std::string> report;
     std::mutex mutex;
 };
@@ -192,6 +243,37 @@ bool ReadBlock(
 std::uintptr_t ReadPointer(const Context& context, const std::uintptr_t address) noexcept {
     std::uintptr_t value{};
     return Read(context, address, value) ? value : 0;
+}
+
+bool WriteUint32(const Context& context, const std::uintptr_t address, const std::uint32_t value) noexcept {
+    if (address == 0 || context.core == nullptr || context.core->write_memory == nullptr) {
+        return false;
+    }
+    AnomalyByteSpanV1 span{
+        reinterpret_cast<const std::uint8_t*>(&value), sizeof(value)};
+    return context.core->write_memory(context.core->user, address, span).code ==
+        ANOMALY_STATUS_V1_OK;
+}
+
+std::string Hex(const std::uintptr_t value) {
+    std::string text = "0x";
+    constexpr char digits[] = "0123456789ABCDEF";
+    bool started = false;
+    for (int shift = static_cast<int>(sizeof(value) * 8U) - 4; shift >= 0; shift -= 4) {
+        const auto nibble = static_cast<std::uint32_t>((value >> shift) & 0xFU);
+        if (nibble != 0) started = true;
+        if (started || shift == 0) text.push_back(digits[nibble]);
+    }
+    return text;
+}
+
+// Every probe decision is logged with this prefix so the runtime log shows what the game
+// answered, not just what the window shows.
+void Log(const Context& context, const std::string_view message) {
+    if (context.core == nullptr || context.core->log == nullptr) return;
+    context.core->log(
+        context.core->user, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
+        anomaly::sdk::StringView(message));
 }
 
 std::string ResolveName(const Context& context, const std::uint32_t name_id) {
@@ -277,6 +359,59 @@ std::uintptr_t ObjectAt(
         context, chunk + static_cast<std::uintptr_t>(within) * kObjectItemStride);
 }
 
+// True while the actor is still the object its GObjects slot points at: the box being gone
+// is the other way an interact shows that it worked.
+bool IsObjectAlive(
+    const Context& context,
+    const std::uintptr_t g_objects,
+    const std::uintptr_t actor) noexcept {
+    std::int32_t index{};
+    if (g_objects == 0 || actor == 0 ||
+        !Read(context, actor + kObjectInternalIndexOffset, index) || index < 0) {
+        return false;
+    }
+    return ObjectAt(context, g_objects, static_cast<std::uint32_t>(index)) == actor;
+}
+
+std::ptrdiff_t InteractFinishOffset(Context& context, const std::uintptr_t cls) noexcept {
+    if (cls == 0) return kInteractFinishOffset;
+    for (const auto& [cached_class, cached_offset] : context.interact_finish_offsets) {
+        if (cached_class == cls) return cached_offset;
+    }
+    std::ptrdiff_t resolved = kInteractFinishOffset;
+    std::uintptr_t owner = cls;
+    for (std::uint32_t depth{}; owner != 0 && depth < 64; ++depth) {
+        std::uintptr_t property{};
+        Read(context, owner + kUStructPropertyLinkOffset, property);
+        for (std::uint32_t count{}; property != 0 && count < 4096; ++count) {
+            std::uint32_t name_id{};
+            std::int32_t offset{};
+            if (Read(context, property + kFFieldNameOffset, name_id) &&
+                ResolveName(context, name_id) == "bInteractFinish" &&
+                Read(context, property + kFPropertyOffsetInternalOffset, offset) &&
+                offset > 0) {
+                resolved = offset;
+                owner = 0;
+                break;
+            }
+            std::uintptr_t next{};
+            if (!Read(context, property + kFPropertyLinkNextOffset, next) || next == property) {
+                break;
+            }
+            property = next;
+        }
+        if (owner == 0) break;
+        std::uintptr_t super{};
+        if (!Read(context, owner + kUStructSuperStructOffset, super) || super == 0 ||
+            super == owner) {
+            break;
+        }
+        owner = super;
+    }
+    context.interact_finish_offsets.emplace_back(cls, resolved);
+    return resolved;
+}
+
 bool FindFunction(
     const Context& context,
     const std::uintptr_t cls,
@@ -339,6 +474,77 @@ bool InvokeProcessEvent(
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
     }
+}
+
+// TriggerInteract is a native RPC reached through ProcessEvent; BoxAuto sets the Native flag
+// for the duration of the call and restores it afterwards, and so does this probe.
+bool InvokeNative(
+    const Context& context,
+    void* object,
+    void* function,
+    void* parameters) noexcept {
+    if (object == nullptr || function == nullptr) return false;
+    const auto flags_address = reinterpret_cast<std::uintptr_t>(function) + kUFunctionFlagsOffset;
+    std::uint32_t original_flags{};
+    if (!Read(context, flags_address, original_flags)) return false;
+    if (!WriteUint32(context, flags_address, original_flags | kFuncNativeFlag)) return false;
+    const bool invoked = InvokeProcessEvent(context, object, function, parameters);
+    static_cast<void>(WriteUint32(context, flags_address, original_flags));
+    return invoked;
+}
+
+// BPGetInteractEntries(controller, out TArray<int32>): the game's own answer to "is there
+// an entry here right now". An empty list is why a remote ServerInteract does nothing.
+bool ReadInteractChoices(
+    const Context& context,
+    const std::uintptr_t actor,
+    const std::uintptr_t function,
+    std::vector<std::int32_t>& choices) noexcept {
+    std::uint8_t params[kInteractEntriesParams]{};
+    std::memcpy(params + 0, &context.controller, sizeof(context.controller));
+    if (!InvokeProcessEvent(
+            context, reinterpret_cast<void*>(actor),
+            reinterpret_cast<void*>(function), params)) {
+        return false;
+    }
+    std::uintptr_t data{};
+    std::int32_t count{};
+    std::int32_t capacity{};
+    std::memcpy(&data, params + 8, sizeof(data));
+    std::memcpy(&count, params + 16, sizeof(count));
+    std::memcpy(&capacity, params + 20, sizeof(capacity));
+    if (count <= 0 || data == 0 || capacity < count || count > kMaximumInteractEntries) {
+        return true;
+    }
+    for (std::int32_t index{}; index < count; ++index) {
+        std::int32_t choice{};
+        if (!Read(
+                context,
+                data + static_cast<std::uintptr_t>(index) * kInteractArrayStride,
+                choice)) {
+            return false;
+        }
+        choices.push_back(choice);
+    }
+    return true;
+}
+
+bool CanTryInteract(
+    const Context& context,
+    const std::uintptr_t actor,
+    const std::int32_t choice,
+    const std::uintptr_t function,
+    bool& can_try) noexcept {
+    std::uint8_t params[kCanTryParams]{};
+    std::memcpy(params + 0, &context.controller, sizeof(context.controller));
+    std::memcpy(params + 8, &choice, sizeof(choice));
+    if (!InvokeProcessEvent(
+            context, reinterpret_cast<void*>(actor),
+            reinterpret_cast<void*>(function), params)) {
+        return false;
+    }
+    can_try = params[12] != 0;
+    return true;
 }
 
 bool CallPickup(
@@ -424,8 +630,13 @@ bool GetController(Context& context) noexcept {
     if (!FindFunction(context, controller_class, "ServerInteract", 2, 12, fn)) {
         return false;
     }
+    std::uintptr_t trigger{};
+    if (!FindFunction(context, controller_class, "TriggerInteract", 3, 13, trigger)) {
+        trigger = 0;
+    }
     context.controller = controller;
     context.server_interact = fn;
+    context.trigger_interact = trigger;
     return true;
 }
 
@@ -441,19 +652,22 @@ bool MatchesLootClass(const std::string_view class_name) noexcept {
 bool BeginScan(Context& context) {
     context.scan = ScanResult{};
     if (context.g_objects_address == 0 &&
-        !ResolveRip(context, kGObjectsPattern, kGObjectsAddend,
-                    context.g_objects_address)) {
+        !ResolveRip(
+            context, kGObjectsPattern, kGObjectsAddend, context.g_objects_address)) {
+        Log(context, "probe resolve GObjects failed");
         return false;
     }
-    std::uintptr_t g_objects{};
-    if (!Read(context, context.g_objects_address, g_objects) || g_objects == 0) {
-        return false;
-    }
+    // The resolved address is the registry itself: BoxAuto and PinkPawHeistESP both index it
+    // directly (items +16, count +36, chunks +44) instead of dereferencing it first.
     std::int32_t count{};
-    if (!Read(context, g_objects + kObjectCountOffset, count) || count <= 0) {
+    if (!Read(context, context.g_objects_address + kObjectCountOffset, count) ||
+        count <= 0) {
+        Log(
+            context, "probe object count unreadable slot=" + Hex(context.g_objects_address) +
+                         " count=" + std::to_string(count));
         return false;
     }
-    context.scan.g_objects = g_objects;
+    context.scan.g_objects = context.g_objects_address;
     context.scan.object_count = count;
     return true;
 }
@@ -479,6 +693,11 @@ bool StepScan(Context& context) {
         }
         std::string class_name = ObjectName(context, cls);
         if (class_name.empty() || !MatchesLootClass(class_name)) continue;
+        // Data assets and other non-actors can carry a matching substring in their class
+        // name; only real placed actors have a root component.
+        if (class_name.find("DataAsset") != std::string::npos) continue;
+        std::uintptr_t root{};
+        if (!Read(context, object + kActorRootComponentOffset, root) || root == 0) continue;
         scan.candidates.push_back({object, std::move(class_name)});
     }
     return scan.cursor >= scan.object_count;
@@ -515,18 +734,6 @@ bool FindInterface(
     return false;
 }
 
-std::string Hex(const std::uintptr_t value) {
-    std::string text = "0x";
-    constexpr char digits[] = "0123456789ABCDEF";
-    bool started = false;
-    for (int shift = static_cast<int>(sizeof(value) * 8U) - 4; shift >= 0; shift -= 4) {
-        const auto nibble = static_cast<std::uint32_t>((value >> shift) & 0xFU);
-        if (nibble != 0) started = true;
-        if (started || shift == 0) text.push_back(digits[nibble]);
-    }
-    return text;
-}
-
 // Localizer::Format consumes string views, so the owning strings stay alive in `values`.
 template <std::size_t N>
 std::array<std::string_view, N> Views(const std::array<std::string, N>& values) noexcept {
@@ -561,6 +768,44 @@ void AddScanLine(
         "status.scan", "Scanned {0} objects, matched {1} candidates", Views(arguments)));
 }
 
+// Read-only pass over the class filter, run once when the plugin loads: it calls no BP
+// function and interacts with nothing, so the first log line of a session says whether the
+// prefix set matches anything in this world at all.
+void RunDiagnostic(
+    Context& context,
+    const ScanResult& scan,
+    std::vector<std::string>& out) {
+    AddScanLine(context, out, scan);
+    std::size_t shown{};
+    for (const auto& candidate : scan.candidates) {
+        if (shown >= 8) break;
+        std::string line = candidate.class_name + " " + Hex(candidate.actor);
+        Log(context, "probe diagnostic candidate=" + line);
+        AddReportLine(out, std::move(line));
+        ++shown;
+    }
+}
+
+// Snapshots bInteractFinish and schedules the post-interact check, so a press reports what
+// the box did rather than what dispatch returned.
+void BeginVerify(
+    Context& context,
+    const std::uintptr_t actor,
+    const std::uintptr_t cls,
+    const std::string_view class_name) {
+    std::uint8_t baseline{};
+    Read(context, actor + InteractFinishOffset(context, cls), baseline);
+    context.verify.active = true;
+    context.verify.actor = actor;
+    context.verify.baseline = baseline;
+    context.verify.due = std::chrono::steady_clock::now() + kVerifyDelay;
+    Log(
+        context, "probe interact fired actor=" + Hex(actor) + " class=" +
+                     std::string(class_name) + " baseline=" + std::to_string(baseline));
+}
+
+// BoxAuto's order: arm the entry through the actor, fire the controller's TriggerInteract,
+// and only fall back to ServerInteract when the actor offers no entry at all.
 void RunRpc(
     Context& context,
     const ScanResult& scan,
@@ -575,24 +820,82 @@ void RunRpc(
         AddError(context, out, "PROFILE", "ServerInteract");
         return;
     }
-    std::size_t sent{};
-    std::size_t failed{};
+    std::size_t armed{};
+    std::size_t can_try_total{};
+    std::size_t fired{};
+    std::size_t logged{};
     for (const auto& candidate : scan.candidates) {
+        const auto actor = candidate.actor;
+        std::uintptr_t cls{};
+        Read(context, actor + kObjectClassOffset, cls);
+        std::uintptr_t entries_fn{};
+        std::uintptr_t can_try_fn{};
+        std::vector<std::int32_t> choices;
+        const bool has_fns =
+            cls != 0 &&
+            FindFunction(context, cls, "BPGetInteractEntries", 2, 24, entries_fn) &&
+            FindFunction(context, cls, "BPCanTryInteract", 3, 13, can_try_fn);
+        const bool has_choices =
+            has_fns && ReadInteractChoices(context, actor, entries_fn, choices);
+        if (logged < 4) {
+            Log(
+                context, "probe candidate class=" + candidate.class_name + " actor=" +
+                             Hex(actor) + " entries=" +
+                             (has_fns ? std::to_string(choices.size())
+                                      : std::string("no-functions")));
+            ++logged;
+        }
+        if (has_choices && !choices.empty()) {
+            ++armed;
+            bool triggered{};
+            for (const auto choice : choices) {
+                bool can_try{};
+                if (!CanTryInteract(context, actor, choice, can_try_fn, can_try) ||
+                    !can_try) {
+                    continue;
+                }
+                ++can_try_total;
+                if (context.trigger_interact == 0) continue;
+                std::uint8_t params[kTriggerInteractParams]{};
+                std::memcpy(params + 0, &actor, sizeof(actor));
+                std::memcpy(params + 8, &choice, sizeof(choice));
+                params[12] = 0;
+                if (InvokeNative(
+                        context, reinterpret_cast<void*>(context.controller),
+                        reinterpret_cast<void*>(context.trigger_interact), params)) {
+                    triggered = true;
+                    break;
+                }
+            }
+            if (triggered) {
+                ++fired;
+                BeginVerify(context, actor, cls, candidate.class_name);
+                break;
+            }
+            continue;
+        }
+        if (context.server_interact == 0) continue;
         std::uint8_t params[12]{};
-        std::memcpy(params, &candidate.actor, sizeof(candidate.actor));
+        std::memcpy(params, &actor, sizeof(actor));
         if (InvokeProcessEvent(
                 context, reinterpret_cast<void*>(context.controller),
                 reinterpret_cast<void*>(context.server_interact), params)) {
-            ++sent;
-        } else {
-            ++failed;
+            ++fired;
+            BeginVerify(context, actor, cls, candidate.class_name);
+            break;
         }
     }
-    const std::array<std::string, 2> arguments{std::to_string(sent), std::to_string(failed)};
+    const std::array<std::string, 4> arguments{
+        std::to_string(scan.candidates.size()), std::to_string(armed),
+        std::to_string(can_try_total), std::to_string(fired)};
     AddReportLine(out, context.localizer.Format(
-        "status.rpc", "RPC: sent {0}, not sent {1}", Views(arguments)));
+        "status.rpc", "RPC: candidates {0}, armed {1}, can-try {2}, fired {3}",
+        Views(arguments)));
 }
 
+// PinkPawHeistESP's route: the container vtable lives at actor+872 and its slot 3 must still
+// hold the resolved pickup entry. The scan is only the fallback for classes that keep the
+// interface somewhere else.
 void RunVtable(
     Context& context,
     const ScanResult& scan,
@@ -618,8 +921,19 @@ void RunVtable(
     std::string first_hit;
     for (const auto& candidate : scan.candidates) {
         InterfaceHit hit{};
-        if (!FindInterface(context, candidate.actor, hit)) {
+        const auto known_vtable = ReadPointer(context, candidate.actor + kPinkPawInterfaceOffset);
+        if (known_vtable != 0 &&
+            ReadPointer(
+                context, known_vtable + kPinkPawPickupSlot * sizeof(void*)) ==
+                context.pickup_function) {
+            hit.offset = kPinkPawInterfaceOffset;
+            hit.slot = kPinkPawPickupSlot;
+        } else if (!FindInterface(context, candidate.actor, hit)) {
             ++missing;
+            Log(
+                context, "probe vtable no-interface actor=" + Hex(candidate.actor) +
+                             " vtable@872=" + Hex(known_vtable) + " class=" +
+                             candidate.class_name);
             continue;
         }
         bool returned{};
@@ -635,20 +949,61 @@ void RunVtable(
         } else {
             ++rejected;
         }
+        Log(
+            context, "probe vtable actor=" + Hex(candidate.actor) + " class=" +
+                         candidate.class_name + " offset=" + Hex(hit.offset) + " slot=" +
+                         std::to_string(hit.slot) + " returned=" +
+                         std::to_string(returned ? 1 : 0));
         if (first_hit.empty()) {
             const std::array<std::string, 3> arguments{
                 candidate.class_name, Hex(hit.offset), std::to_string(hit.slot)};
             first_hit = context.localizer.Format(
                 "status.interface", "First interface: {0} at {1} slot {2}", Views(arguments));
         }
+        if (returned) break;
     }
-    const std::array<std::string, 4> arguments{
-        std::to_string(tried), std::to_string(accepted), std::to_string(rejected),
-        std::to_string(missing)};
+    const std::array<std::string, 5> arguments{
+        std::to_string(scan.candidates.size()), std::to_string(tried),
+        std::to_string(accepted), std::to_string(rejected), std::to_string(missing)};
     AddReportLine(out, context.localizer.Format(
-        "status.vtable", "Vtable: tried {0}, true {1}, false {2}, no interface {3}",
+        "status.vtable",
+        "Vtable: candidates {0}, tried {1}, true {2}, false {3}, no interface {4}",
         Views(arguments)));
     if (!first_hit.empty()) AddReportLine(out, std::move(first_hit));
+}
+
+// The 3-second follow-up: a box that opened either flipped bInteractFinish or left the
+// world. Anything else means the call was accepted and then ignored by the game.
+void CompleteVerify(Context& context) {
+    if (!context.verify.active) return;
+    if (std::chrono::steady_clock::now() < context.verify.due) return;
+    const auto actor = context.verify.actor;
+    const auto baseline = context.verify.baseline;
+    context.verify.active = false;
+    std::uintptr_t cls{};
+    Read(context, actor + kObjectClassOffset, cls);
+    std::uint8_t current{};
+    const bool read =
+        Read(context, actor + InteractFinishOffset(context, cls), current);
+    const bool alive = IsObjectAlive(context, context.scan.g_objects, actor);
+    const bool opened = (read && current != baseline) || !alive;
+    const std::array<std::string, 4> arguments{
+        std::to_string(baseline), read ? std::to_string(current) : std::string("n/a"),
+        alive ? std::string("1") : std::string("0"),
+        context.localizer.Text(
+            opened ? "verify.opened" : "verify.unchanged",
+            opened ? "opened" : "unchanged")};
+    const std::string line = context.localizer.Format(
+        "status.verify",
+        "After 3s: bInteractFinish {0} -> {1}, alive {2}, verdict {3}",
+        Views(arguments));
+    Log(
+        context, "probe verify actor=" + Hex(actor) + " baseline=" + std::to_string(baseline) +
+                     " current=" + (read ? std::to_string(current) : std::string("n/a")) +
+                     " alive=" + std::to_string(alive ? 1 : 0) +
+                     " opened=" + std::to_string(opened ? 1 : 0));
+    std::scoped_lock lock(context.mutex);
+    context.report.push_back(line);
 }
 
 bool UiReady(const AnomalyUiServiceV1* service) noexcept {
@@ -706,6 +1061,10 @@ AnomalyStatusV1 ANOMALY_CALL Start(void* user) {
     if (context == nullptr) return Status(ANOMALY_STATUS_V1_INVALID_ARGUMENT);
     std::scoped_lock lock(context->mutex);
     context->started = true;
+    // One automatic read-only pass, so a session always leaves a record of what the class
+    // filter sees even if nobody presses a button.
+    context->pending = Action::diagnostic;
+    Log(*context, "probe start");
     return anomaly::sdk::Ok();
 }
 
@@ -730,10 +1089,15 @@ void ANOMALY_CALL Unload(void* user) {
 void ANOMALY_CALL Update(void* user, double) {
     auto* context = static_cast<Context*>(user);
     if (context == nullptr) return;
-    Action running{Action::none};
     {
         std::scoped_lock lock(context->mutex);
         if (!context->started) return;
+    }
+    // The post-interact check reads the box on the game thread, like the call it follows.
+    CompleteVerify(*context);
+    Action running{Action::none};
+    {
+        std::scoped_lock lock(context->mutex);
         if (context->running == Action::none) {
             if (context->pending == Action::none) return;
             context->running = context->pending;
@@ -744,8 +1108,10 @@ void ANOMALY_CALL Update(void* user, double) {
                 AddError(*context, failure, "SCAN", "GObjects");
                 context->running = Action::none;
                 context->report = std::move(failure);
+                Log(*context, "probe begin-scan failed");
                 return;
             }
+            Log(*context, "probe scan start objects=" + std::to_string(context->scan.object_count));
         }
         running = context->running;
     }
@@ -762,10 +1128,16 @@ void ANOMALY_CALL Update(void* user, double) {
         return;
     }
     std::vector<std::string> out;
+    Log(
+        *context, "probe scan objects=" + std::to_string(context->scan.object_count) +
+                      " candidates=" + std::to_string(context->scan.candidates.size()) +
+                      " action=" + std::to_string(static_cast<int>(running)));
     if (running == Action::rpc) {
         RunRpc(*context, context->scan, out);
-    } else {
+    } else if (running == Action::vtable) {
         RunVtable(*context, context->scan, out);
+    } else {
+        RunDiagnostic(*context, context->scan, out);
     }
     if (out.empty()) {
         AddError(*context, out, "PROBE", "no report");
