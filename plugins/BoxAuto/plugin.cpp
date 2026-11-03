@@ -228,6 +228,8 @@ struct Context final {
     bool teleported{};
     bool moving{};
     bool interacted{};
+    bool key_fired{};
+    int key_grace{};
     bool food_approaching{};
     std::chrono::steady_clock::time_point food_approach_deadline{};
     std::chrono::steady_clock::time_point interact_verify_deadline{};
@@ -374,7 +376,8 @@ bool UsesPickupService(const std::string_view category) noexcept {
 
 bool IsRelaxedPrefix(const std::string_view prefix) noexcept {
     return prefix == "PropBox_Yahaha" || prefix == "PropBox_Once" ||
-        prefix == "Prison" || prefix == "InteractBox" || prefix == "ShopStealGoods_";
+        prefix == "Prison" || prefix == "InteractBox" || prefix == "ShopStealGoods_" ||
+        prefix == "CabinetKey";
 }
 
 bool DeveloperModeEnabled(const AnomalyUiServiceV1* ui) noexcept {
@@ -532,6 +535,8 @@ void ResetPointState(Context& context) noexcept {
     context.teleported = false;
     context.moving = false;
     context.interacted = false;
+    context.key_fired = false;
+    context.key_grace = 0;
     context.food_approaching = false;
     context.food_has_last_pos = false;
     context.fallout_baseline_z = 0.0;
@@ -1538,6 +1543,7 @@ constexpr std::string_view CategoryForChoice(const std::uint32_t choice) noexcep
         case 8: return "prison";
         case 9: return "wallet";
         case 11: return "shop_steal";
+        case 12: return "locker_key";
         default: return "";
     }
 }
@@ -1554,6 +1560,7 @@ constexpr std::string_view ActorPrefixForChoice(const std::uint32_t choice) noex
         case 8: return "Prison";
         case 9: return "InteractBox";
         case 11: return "ShopStealGoods_";
+        case 12: return "CabinetKey";
         default: return "";
     }
 }
@@ -1570,6 +1577,7 @@ constexpr std::string_view ActorPrefixForCategory(
     if (category == "prison") return "PropBox_Once";
     if (category == "wallet") return "InteractBox";
     if (category == "shop_steal") return "ShopStealGoods_";
+    if (category == "locker_key") return "CabinetKey";
     return "";
 }
 
@@ -1684,6 +1692,107 @@ void ReadRandomItemTable(Context& context, std::vector<Point>& points) {
     }
 }
 
+void LogBox(Context& context, const std::string& message);
+
+// Lost locker keys are actors, not table rows, so their points come from a straight GObjects
+// sweep: the actor's own location is where the walker has to stand, and taking the key destroys
+// the actor, which keeps the list self-pruning between table reads.
+void CollectLockerKeys(Context& context, std::vector<Point>& points) {
+    if (context.g_objects_address == 0 &&
+        !ResolveRipRelative(context, kGObjectsPattern, kGObjectsAddend,
+                            context.g_objects_address)) {
+        return;
+    }
+    std::int32_t count{};
+    std::int32_t num_chunks{};
+    std::uintptr_t items{};
+    if (!Read(reinterpret_cast<const void*>(
+                  context.g_objects_address + kObjectItemsOffset), items) ||
+        items == 0 ||
+        !Read(reinterpret_cast<const void*>(
+                  context.g_objects_address + kObjectCountOffset), count) ||
+        !Read(reinterpret_cast<const void*>(
+                  context.g_objects_address + kObjectNumChunksOffset), num_chunks) ||
+        count <= 0 || num_chunks <= 0) {
+        return;
+    }
+    std::unordered_map<std::uintptr_t, bool> class_cache;
+    std::unordered_map<std::uintptr_t, std::string> name_cache;
+    std::uint32_t cur_chunk = 0xFFFFFFFFu;
+    std::uintptr_t chunk{};
+    std::size_t added{};
+    std::size_t degenerate{};
+    for (std::int32_t i = 0; i < count; ++i) {
+        const auto chunk_index = static_cast<std::uint32_t>(i) / kObjectChunkSize;
+        if (chunk_index != cur_chunk) {
+            cur_chunk = chunk_index;
+            if (!Read(reinterpret_cast<const void*>(
+                          items + static_cast<std::uintptr_t>(chunk_index) * sizeof(void*)), chunk) ||
+                chunk == 0) {
+                continue;
+            }
+        }
+        const auto within = static_cast<std::uint32_t>(i) % kObjectChunkSize;
+        std::uintptr_t object{};
+        if (!Read(reinterpret_cast<const void*>(
+                      chunk + static_cast<std::uintptr_t>(within) * kObjectItemStride), object) ||
+            object == 0) {
+            continue;
+        }
+        std::uintptr_t cls{};
+        if (!Read(reinterpret_cast<const void*>(object + kObjectClassOffset), cls) ||
+            cls == 0) {
+            continue;
+        }
+        const auto cached = class_cache.find(cls);
+        bool is_key{};
+        if (cached != class_cache.end()) {
+            is_key = cached->second;
+        } else {
+            const std::string cls_name = ObjectName(context.names, cls);
+            is_key = cls_name.find("CabinetKey") != std::string::npos;
+            class_cache[cls] = is_key;
+            name_cache[cls] = cls_name;
+        }
+        if (!is_key) continue;
+        // The class default object has no root component, but checking it explicitly keeps the
+        // sweep from ever treating the template as a point.
+        std::uintptr_t cdo{};
+        if (Read(reinterpret_cast<const void*>(cls + kUClassDefaultObjectOffset), cdo) &&
+            cdo == object) {
+            continue;
+        }
+        std::uintptr_t root{};
+        if (!Read(reinterpret_cast<const void*>(object + kActorRootComponentOffset), root) ||
+            root == 0) {
+            continue;
+        }
+        double x{}, y{}, z{};
+        if (!Read(reinterpret_cast<const void*>(root + kSceneComponentLocationOffset), x) ||
+            !Read(reinterpret_cast<const void*>(root + kSceneComponentLocationOffset + 8), y) ||
+            !Read(reinterpret_cast<const void*>(root + kSceneComponentLocationOffset + 16), z)) {
+            continue;
+        }
+        if (x == 0.0 && y == 0.0 && z == 0.0) continue;
+        // 刚流式加载出来的钥匙有一瞬间位置还在原点（可能只有 x=y=0，z 已经有值），
+        // 记成点位就会把玩家传到地图原点（用户实测）。平面原点一定是假位置。
+        if (std::abs(x) < 1.0 && std::abs(y) < 1.0) {
+            ++degenerate;
+            continue;
+        }
+        Point p;
+        p.row_name = ObjectName(context.names, object);
+        p.x = x;
+        p.y = y;
+        p.z = z;
+        p.category = "locker_key";
+        points.push_back(std::move(p));
+        ++added;
+    }
+    LogBox(context, "key sweep added=" + std::to_string(added) +
+        " degenerate=" + std::to_string(degenerate));
+}
+
 void ReadTable(Context& context) {
     std::vector<Point> points;
     void* table_object{};
@@ -1782,6 +1891,7 @@ void ReadTable(Context& context) {
         points.push_back(std::move(p));
     }
     ReadRandomItemTable(context, points);
+    CollectLockerKeys(context, points);
     std::lock_guard<std::mutex> lock(context.mutex);
     context.points = std::move(points);
     RebuildFilteredLocked(context);
@@ -2483,6 +2593,32 @@ bool TriggerInteractPickup(Context& context, const std::uintptr_t actor,
     if (probe != nullptr && probe->can_try == 0) probe->reason = "no-can-try";
     else if (probe != nullptr) probe->reason = "trigger-refused";
     return false;
+}
+
+// A taken key keeps its actor for a moment while the pick-up timeline plays, so "actor is gone"
+// cannot be the only success signal: the game also stops offering interact entries once the key
+// is collected. Reading the entries back is how the walker notices that without waiting.
+bool ActorOffersInteractEntries(Context& context, const std::uintptr_t actor,
+                                int& entries) noexcept {
+    entries = 0;
+    if (actor == 0 || context.trigger_interact_fn == 0) return false;
+    std::uintptr_t cls{};
+    if (!Read(reinterpret_cast<const void*>(actor + kObjectClassOffset), cls) ||
+        cls == 0) {
+        return false;
+    }
+    std::uintptr_t entries_fn{};
+    if (!FindFunction(context.names, cls, "BPGetInteractEntries", 2, 24,
+                      entries_fn)) {
+        return false;
+    }
+    std::vector<std::int32_t> choices;
+    if (!ReadInteractChoices(context, actor, context.controller, entries_fn,
+                             choices)) {
+        return false;
+    }
+    entries = static_cast<int>(choices.size());
+    return true;
 }
 
 void LogShop(Context& context, const std::string& message) {
@@ -3465,6 +3601,224 @@ void TickFoodPickup(Context& context, const Point& p,
     }
 }
 
+// Lost locker keys are plain interactable actors: they have no pickup-service entry, so the
+// interaction entries the actor exposes are what actually take the key, and the key leaving
+// GObjects is the only trustworthy confirmation.
+void TickLockerKey(Context& context, const Point& p,
+                   const std::chrono::steady_clock::time_point now) {
+    if (context.target_actor == 0) {
+        context.target_actor = ScanForActor(context, p, "CabinetKey");
+        if (context.target_actor == 0) {
+            ++context.retry_count;
+            if (context.retry_count <= kActorLoadWaitSeconds) {
+                context.due = now + std::chrono::milliseconds(1000);
+                const std::string attempt = std::to_string(context.retry_count);
+                const std::array args{std::string_view(p.row_name),
+                                      std::string_view(attempt)};
+                context.status = context.localizer.Format(
+                    "status.key_wait_actor", "Waiting key load {0} ({1})", args);
+            } else {
+                ++context.skipped;
+                ++context.current_index;
+                ResetPointState(context);
+                context.due = now;
+                const std::array args{std::string_view(p.row_name)};
+                context.status = context.localizer.Format(
+                    "status.key_not_found", "Key not found, skip {0}", args);
+            }
+            return;
+        }
+    }
+    double actor_pos[3]{};
+    double player_pos[3]{};
+    const bool located = ReadActorLocation(context, context.target_actor, actor_pos) &&
+        SnapshotPlayerPosition(context, player_pos);
+    // 交互发出之后 actor 可能已经在销毁、连位置都读不到——这是正常的收尾状态，不能在这里
+    // 每 500 毫秒空转（用户实测：交互成功后流程就此卡死，不再处理后面的点）。交给下面的
+    // 确认流程用 entries / GObjects 判定。
+    if (!located && !context.interacted) {
+        ++context.retry_count;
+        context.target_actor = 0;
+        if (context.retry_count > kActorLoadWaitSeconds) {
+            LogBox(context, "key location lost point=" + p.row_name);
+            ++context.skipped;
+            ++context.current_index;
+            ResetPointState(context);
+            context.due = now;
+            const std::array lost_args{std::string_view(p.row_name)};
+            context.status = context.localizer.Format(
+                "status.key_unreachable", "Key position unreachable, skip {0}", lost_args);
+            return;
+        }
+        context.due = now + std::chrono::milliseconds(500);
+        return;
+    }
+    const double dx = player_pos[0] - actor_pos[0];
+    const double dy = player_pos[1] - actor_pos[1];
+    const double dz = player_pos[2] - actor_pos[2];
+    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const bool developer_mode = context.developer_mode.load(std::memory_order_acquire);
+    const double approach_threshold = developer_mode
+        ? kTeleportApproachRadiusCentimeters
+        : kPickupApproachRadiusCentimeters;
+    // 交互已经发出后就不再重新接近：此刻 actor 可能正在销毁，组件位置会被清零，
+    // 按它算出来的距离会变成“几公里”，于是把玩家传到地图原点（用户实测）。
+    if (!context.interacted && dist > approach_threshold) {
+        Point approach;
+        approach.x = actor_pos[0];
+        approach.y = actor_pos[1];
+        approach.z = actor_pos[2];
+        if (developer_mode || dist > kTargetActorMaxDistanceCentimeters) {
+            if (std::abs(actor_pos[0]) < 1.0 && std::abs(actor_pos[1]) < 1.0) {
+                // 位置读成原点：actor 还没定位或正在销毁，按它传送会飞回地图原点。
+                ++context.retry_count;
+                context.target_actor = 0;
+                if (context.retry_count > kActorLoadWaitSeconds) {
+                    LogBox(context, "key position zero point=" + p.row_name);
+                    ++context.skipped;
+                    ++context.current_index;
+                    ResetPointState(context);
+                    context.due = now;
+                    const std::array zero_args{std::string_view(p.row_name)};
+                    context.status = context.localizer.Format(
+                        "status.key_unreachable", "Key position unreachable, skip {0}",
+                        zero_args);
+                } else {
+                    context.due = now + std::chrono::milliseconds(1000);
+                }
+                return;
+            }
+            if (context.interact_retry >= 3) {
+                // 传了三次都没到位（位置读错或落点被引擎拒绝），别无限重传：跳过并留证据。
+                LogBox(context, "key teleport gave up point=" + p.row_name + " cm=" +
+                    std::to_string(static_cast<long long>(dist)));
+                ++context.skipped;
+                ++context.current_index;
+                ResetPointState(context);
+                context.due = now;
+                const std::array unreachable_args{std::string_view(p.row_name)};
+                context.status = context.localizer.Format(
+                    "status.key_unreachable", "Key position unreachable, skip {0}",
+                    unreachable_args);
+                return;
+            }
+            ++context.interact_retry;
+            Teleport(context, approach);
+            LogBox(context, "key teleport point=" + p.row_name + " to=" +
+                std::to_string(static_cast<long long>(actor_pos[0])) + "," +
+                std::to_string(static_cast<long long>(actor_pos[1])) + "," +
+                std::to_string(static_cast<long long>(actor_pos[2])) + " cm=" +
+                std::to_string(static_cast<long long>(dist)));
+            context.due = now + std::chrono::milliseconds(1000);
+            const std::string distance = std::to_string(static_cast<long long>(dist));
+            const std::array args{std::string_view(p.row_name),
+                                  std::string_view(distance)};
+            context.status = context.localizer.Format(
+                "status.key_approach", "Approaching key {0} ({1}cm)", args);
+            return;
+        }
+        if (NavigationReady(context.navigation)) {
+            double dest[3]{};
+            ComputeApproachDestination(context, approach, dest);
+            if (!context.food_approaching) {
+                context.navigation->stop_movement(context.navigation->user);
+                context.food_approaching =
+                    context.navigation->move_to_location(
+                        context.navigation->user, dest).code == ANOMALY_STATUS_V1_OK;
+            } else {
+                context.navigation->move_to_location(
+                    context.navigation->user, dest);
+            }
+            context.due = now + std::chrono::milliseconds(300);
+            const std::string distance = std::to_string(static_cast<long long>(dist));
+            const std::array args{std::string_view(p.row_name),
+                                  std::string_view(distance)};
+            context.status = context.localizer.Format(
+                "status.key_approach", "Approaching key {0} ({1}cm)", args);
+            return;
+        }
+        context.due = now + std::chrono::milliseconds(500);
+        return;
+    }
+    context.food_approaching = false;
+    if (!context.interacted) {
+        InteractProbe probe{};
+        const bool fired = TriggerInteractPickup(context, context.target_actor, &probe);
+        context.interacted = true;
+        context.key_fired = fired;
+        context.due = now + std::chrono::milliseconds(2000);
+        const std::string entries = std::to_string(probe.entries);
+        const std::string fired_text = fired ? "1" : "0";
+        const std::array args{std::string_view(p.row_name), std::string_view(entries),
+                              std::string_view(fired_text)};
+        context.status = context.localizer.Format(
+            "status.key_interact", "Interacting with key {0} (entries {1}, fired {2})", args);
+        LogBox(context, "key interact point=" + p.row_name + " entries=" + entries +
+                            " fired=" + fired_text + " reason=" +
+                            std::string(probe.reason));
+        if (!fired && probe.entries == 0) {
+            // No entries at all: this key was already taken, so there is nothing to interact
+            // with and the point is finished.
+            ++context.picked;
+            ++context.current_index;
+            ResetPointState(context);
+            context.due = now;
+            const std::array gone_args{std::string_view(p.row_name)};
+            context.status = context.localizer.Format(
+                "status.key_already", "Key already taken {0}", gone_args);
+            LogBox(context, "key already taken point=" + p.row_name);
+        }
+        return;
+    }
+    int live_entries{};
+    const bool entries_readable =
+        ActorOffersInteractEntries(context, context.target_actor, live_entries);
+    if (!IsObjectInGObjects(context, context.target_actor) ||
+        (entries_readable && live_entries == 0)) {
+        ++context.picked;
+        ++context.current_index;
+        ResetPointState(context);
+        context.due = now;
+        const std::array args{std::string_view(p.row_name)};
+        context.status = context.localizer.Format("status.key_picked", "Key picked {0}", args);
+        LogBox(context, "key picked point=" + p.row_name +
+                            (entries_readable ? " via=entries" : " via=gone"));
+        return;
+    }
+    // 拾取成功的证据就是它消失。刚发出交互的一两秒里 actor 还在播自己的收集动画，
+    // 所以给它宽限再看一次；仍然在、并且还提供交互项，就是真的没成，重新接近一次再放弃。
+    if (context.key_fired && context.key_grace < 3) {
+        ++context.key_grace;
+        context.due = now + std::chrono::milliseconds(1500);
+        const std::array args{std::string_view(p.row_name)};
+        context.status = context.localizer.Format(
+            "status.key_verifying", "Checking key {0}", args);
+        return;
+    }
+    if (context.teleport_retry == 0) {
+        context.teleport_retry = 1;
+        context.target_actor = 0;
+        context.interacted = false;
+        context.key_fired = false;
+        context.key_grace = 0;
+        context.retry_count = 0;
+        context.teleported = false;
+        context.due = now + std::chrono::milliseconds(2000);
+        const std::array args{std::string_view(p.row_name)};
+        context.status = context.localizer.Format(
+            "status.key_reattempt", "Key remained, re-approach {0}", args);
+        return;
+    }
+    ++context.skipped;
+    ++context.current_index;
+    ResetPointState(context);
+    context.due = now;
+    const std::array args{std::string_view(p.row_name)};
+    context.status = context.localizer.Format(
+        "status.key_remained_skip", "Key remained, skip {0}", args);
+    LogBox(context, "key remained skip point=" + p.row_name);
+}
+
 void Tick(Context& context) {
     std::lock_guard<std::mutex> lock(context.mutex);
     if (!context.running) return;
@@ -3573,7 +3927,10 @@ void Tick(Context& context) {
         PrepareShopStealth(context, p, now);
         return;
     }
-    if (!context.teleported && !context.moving && !context.landmark_transfer_wait) {
+    // 钥匙的点位是扫描时的 actor 位置：流式加载期间读到的位置可能已经过期，
+    // 直接按它传送会落到错误的地方。交给 TickLockerKey 用实时位置决定落点。
+    if (!context.teleported && !context.moving && !context.landmark_transfer_wait &&
+        p.category != "locker_key") {
         if (context.developer_mode.load(std::memory_order_acquire)) {
             if (Teleport(context, p)) {
                 context.teleported = true;
@@ -3769,6 +4126,10 @@ void Tick(Context& context) {
     }
     if (UsesPickupService(p.category)) {
         TickPickup(context, p, now);
+        return;
+    }
+    if (p.category == "locker_key") {
+        TickLockerKey(context, p, now);
         return;
     }
     if (p.category == "box_food" || p.category == "item_food" ||
@@ -4579,7 +4940,7 @@ void ANOMALY_CALL Draw(void* plugin_context, const AnomalyUiServiceV1* supplied_
     if (ui->button(ui->user, anomaly::sdk::StringView(read_table_label), 0.0F, 0.0F) != 0) {
         context.read_pending.store(true, std::memory_order_release);
     }
-    const std::array<std::string, 12> type_names = {
+    const std::array<std::string, 13> type_names = {
         context.localizer.Text("type.all", "All"),
         context.localizer.Text("type.hunter", "Hunter Box"),
         context.localizer.Text("type.character", "Character Box"),
@@ -4592,6 +4953,7 @@ void ANOMALY_CALL Draw(void* plugin_context, const AnomalyUiServiceV1* supplied_
         context.localizer.Text("type.wallet", "Wallet"),
         context.localizer.Text("type.oracle", "Oracle Stone"),
         context.localizer.Text("type.shop_steal", "Shop Items"),
+        context.localizer.Text("type.locker_key", "Lost Locker Key"),
     };
     for (std::size_t i = 0; i < type_names.size(); ++i) {
         if (ui->button(ui->user, anomaly::sdk::StringView(type_names[i]), 0.0F, 0.0F) != 0) {
