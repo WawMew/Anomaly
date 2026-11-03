@@ -1367,19 +1367,41 @@ void RunUnlock(Context& context, std::vector<std::string>& out) {
         std::uint8_t parms;
         std::uint16_t size;
     };
-    static constexpr std::array<Step, 6> steps{{
-        {true, "Server_UnLockTreasureBox", 1, 8},
-        {false, "BP_UnlockTreasureBox", 0, 0},
+    // HTPointTreasureBoxActor and AHTTreasureBoxActor both declare BP_OpenTreasureBox but with
+    // different signatures (0/0 and 1/8), so both shapes are tried. The safe lineage is the
+    // point flavour, which is why its own (0/0) entry is listed first.
+    static constexpr std::array<Step, 7> steps{{
         {false, "BP_ClientUnlockTreasureBox", 0, 0},
-        {false, "BP_OnOpenSuccess", 0, 0},
+        {false, "BP_OpenTreasureBox", 0, 0},
         {false, "BP_OpenTreasureBox", 1, 8},
-        {false, "BP_Open", 0, 0},
+        {false, "NetMulticast_NotifyTreasureBoxUnlock", 0, 0},
+        {false, "BP_OnOpenSuccess", 0, 0},
+        {false, "BP_UnlockTreasureBox", 0, 0},
+        {true, "Server_UnLockTreasureBox", 1, 8},
     }};
     GetController(context);
     std::uintptr_t controller_cls{};
     if (context.controller != 0) {
         Read(context, context.controller + kObjectClassOffset, controller_cls);
     }
+    // BP_IsTreasureBoxOpened is the flag the box itself reports; read it between steps so the
+    // run stops on the event that actually flipped the box instead of firing all of them.
+    auto read_opened = [&](bool& known) -> bool {
+        known = false;
+        std::uintptr_t getter{};
+        if (cls == 0 ||
+            !FindFunction(context, cls, "BP_IsTreasureBoxOpened", 1, 1, getter)) {
+            return false;
+        }
+        std::uint8_t params[4]{};
+        if (!InvokeProcessEvent(
+                context, reinterpret_cast<void*>(actor),
+                reinterpret_cast<void*>(getter), params)) {
+            return false;
+        }
+        known = true;
+        return params[0] != 0;
+    };
     std::string found;
     std::string used;
     bool fired{};
@@ -1393,15 +1415,23 @@ void RunUnlock(Context& context, std::vector<std::string>& out) {
         }
         if (!found.empty()) found.push_back(',');
         found.append(step.name);
-        if (fired) continue;
         std::uint8_t params[16]{};
         if (step.size >= sizeof(actor)) std::memcpy(params, &actor, sizeof(actor));
-        if (InvokeProcessEvent(
-                context, reinterpret_cast<void*>(owner),
-                reinterpret_cast<void*>(function), params)) {
+        const bool ok = InvokeProcessEvent(
+            context, reinterpret_cast<void*>(owner),
+            reinterpret_cast<void*>(function), params);
+        bool known{};
+        const bool open_now = read_opened(known);
+        Log(
+            context, "probe unlock step=" + std::string(step.name) + " parms=" +
+                         std::to_string(step.parms) + " ok=" + std::to_string(ok ? 1 : 0) +
+                         " opened=" + (known ? std::to_string(open_now ? 1 : 0) : std::string("n/a")));
+        if (ok) {
             fired = true;
-            used = std::string(step.name);
+            if (!used.empty()) used.push_back('+');
+            used.append(step.name);
         }
+        if (known && open_now) break;
     }
     Log(
         context, "probe unlock actor=" + Hex(actor) + " class=" + target->class_name +
