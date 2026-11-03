@@ -127,6 +127,17 @@ constexpr std::array<std::string_view, 10> kLootClassPrefixes{
     "HunterBox_", "CharacterUpBox_", "ChameleonBox", "FurnitureBox", "PropBox_Geft",
     "PropBox_Yahaha", "PropBox_Once", "Prison", "InteractBox", "ShopStealGoods_"};
 
+// Class-name fragments a world safe, locker or vault is instantiated under. These are not
+// resource boxes, so BoxAuto never touches them and the probe needs its own needle list.
+constexpr std::array<std::string_view, 4> kSafeClassNeedles{
+    "CabinetKey", "Locker", "SafeBox", "Vault"};
+// How many of the closest actors the safe press writes to the log, so a run that finds
+// nothing still says what is actually standing around the player.
+constexpr std::size_t kNearActorReportLines = 6;
+// A world safe is placed against a wall, so its origin sits further from the player than a
+// loot box on open ground; the interaction still resolves at this range.
+constexpr double kSafeTargetRadiusCentimeters = 1200.0;
+
 enum class Action : std::uint32_t {
     none = 0,
     server_interact = 1,
@@ -134,6 +145,8 @@ enum class Action : std::uint32_t {
     host_pickup = 3,
     vtable = 4,
     diagnostic = 5,
+    safe = 6,
+    unlock = 7,
 };
 
 // BoxAuto only ever interacts inside 250cm (120cm in developer mode); the probe keeps a
@@ -188,6 +201,7 @@ struct Context final {
     const AnomalySignatureServiceV1* signature{};
     const AnomalyUe5NamesServiceV1* names{};
     const AnomalyNteEntitiesServiceV1* entities{};
+    const AnomalyNteActorsServiceV1* actors{};
     const AnomalyNtePickupServiceV1* pickup{};
     std::uintptr_t g_objects_address{};
     std::uintptr_t g_world_address{};
@@ -196,6 +210,9 @@ struct Context final {
     std::uintptr_t trigger_interact{};
     std::uintptr_t pickup_function{};
     bool started{};
+    // One read-only actor pass per session, so the log names what is around the player even
+    // before any button is pressed.
+    bool actor_probe_done{};
     // `pending` is the render-to-game handoff; `running`, `scan` and `verify` belong to
     // Update alone.
     Action pending{Action::none};
@@ -204,6 +221,7 @@ struct Context final {
     VerifyState verify;
     PickupWatch pickup_watch;
     std::vector<std::pair<std::uint64_t, std::string>> entity_class_names;
+    std::vector<std::pair<std::uint64_t, std::string>> actor_class_names;
     std::vector<std::pair<std::uintptr_t, std::ptrdiff_t>> interact_finish_offsets;
     std::vector<std::string> report;
     std::mutex mutex;
@@ -708,11 +726,32 @@ const std::string& EntityClassName(Context& context, const std::uint64_t class_i
     return context.entity_class_names.back().second;
 }
 
+// The NTE services only exist once the game world is up: a plugin loaded at boot queries
+// nulls and would stay dead for the whole session, so every press retries the query first.
+void EnsureServices(Context& context) {
+    if (context.entities == nullptr) {
+        context.entities = Query<AnomalyNteEntitiesServiceV1>(
+            context.host, ANOMALY_NTE_ENTITIES_SERVICE_V1_ID,
+            ANOMALY_NTE_ENTITIES_SERVICE_V1_VERSION);
+    }
+    if (context.actors == nullptr) {
+        context.actors = Query<AnomalyNteActorsServiceV1>(
+            context.host, ANOMALY_NTE_ACTORS_SERVICE_V1_ID,
+            ANOMALY_NTE_ACTORS_SERVICE_V1_VERSION);
+    }
+    if (context.pickup == nullptr) {
+        context.pickup = Query<AnomalyNtePickupServiceV1>(
+            context.host, ANOMALY_NTE_PICKUP_SERVICE_V1_ID,
+            ANOMALY_NTE_PICKUP_SERVICE_V1_VERSION);
+    }
+}
+
 // Target acquisition, the way PinkPawHeistESP does it: page the Host's entity frame and keep
 // the loot actors it already knows about. No GObjects walk - each match costs one object
 // lookup, so a press stays cheap on the game thread.
 bool CollectTargets(Context& context) {
     context.scan = ScanResult{};
+    EnsureServices(context);
     const auto* service = context.entities;
     if (service == nullptr || service->frame == nullptr || service->page == nullptr ||
         service->class_name_utf8 == nullptr) {
@@ -776,6 +815,125 @@ bool CollectTargets(Context& context) {
         [](const Candidate& left, const Candidate& right) {
             return left.distance < right.distance;
         });
+    return true;
+}
+
+bool MatchesSafeClass(const std::string_view class_name) noexcept {
+    for (const auto needle : kSafeClassNeedles) {
+        if (class_name.find(needle) != std::string_view::npos) return true;
+    }
+    return false;
+}
+
+// Actor discovery is a different Host service from the entity frame: it pages every loaded
+// actor, which is what makes a world safe visible at all - being a level actor, it never
+// shows up in the loot-oriented entity frame.
+const std::string& ActorClassName(Context& context, const std::uint64_t class_id) {
+    static const std::string empty;
+    for (const auto& entry : context.actor_class_names) {
+        if (entry.first == class_id) return entry.second;
+    }
+    const auto* service = context.actors;
+    if (service == nullptr || service->class_name_utf8 == nullptr) return empty;
+    std::size_t size{};
+    if (service->class_name_utf8(service->user, class_id, nullptr, &size).code !=
+            ANOMALY_STATUS_V1_OK ||
+        size <= 1 || size > kMaximumNameBytes) {
+        context.actor_class_names.emplace_back(class_id, std::string{});
+        return context.actor_class_names.back().second;
+    }
+    std::string name(size, '\0');
+    if (service->class_name_utf8(service->user, class_id, name.data(), &size).code !=
+        ANOMALY_STATUS_V1_OK) {
+        context.actor_class_names.emplace_back(class_id, std::string{});
+        return context.actor_class_names.back().second;
+    }
+    if (const void* terminator = std::memchr(name.data(), '\0', name.size());
+        terminator != nullptr) {
+        name.resize(static_cast<const char*>(terminator) - name.data());
+    }
+    context.actor_class_names.emplace_back(class_id, std::move(name));
+    return context.actor_class_names.back().second;
+}
+
+// One pass over the actor frame fills two lists: every safe-like actor, and the nearest few
+// actors of any class so a miss can still name what the player is standing next to.
+bool CollectNearbyActors(
+    Context& context,
+    std::vector<Candidate>& safes,
+    std::vector<Candidate>& nearest) {
+    safes.clear();
+    nearest.clear();
+    EnsureServices(context);
+    const auto* service = context.actors;
+    if (service == nullptr || service->frame == nullptr || service->page == nullptr ||
+        service->class_name_utf8 == nullptr) {
+        Log(context, "probe actor service unavailable");
+        return false;
+    }
+    if (context.g_objects_address == 0 &&
+        !ResolveRip(
+            context, kGObjectsPattern, kGObjectsAddend, context.g_objects_address)) {
+        Log(context, "probe resolve GObjects failed");
+        return false;
+    }
+    AnomalyNteEntityFrameV1 frame{sizeof(frame)};
+    if (service->frame(service->user, &frame).code != ANOMALY_STATUS_V1_OK ||
+        frame.generation == 0 || frame.entity_count == 0) {
+        Log(context, "probe actor frame unavailable");
+        return false;
+    }
+    std::array<AnomalyNteEntitySnapshotV1, kEntityPageCapacity> page{};
+    std::uint32_t offset{};
+    std::vector<Candidate> all;
+    while (offset < frame.entity_count) {
+        for (auto& snapshot : page) snapshot = AnomalyNteEntitySnapshotV1{sizeof(snapshot)};
+        AnomalyNteEntityPageRequestV1 request{};
+        request.struct_size = sizeof(request);
+        request.generation = frame.generation;
+        request.offset = offset;
+        request.capacity = static_cast<std::uint32_t>(page.size());
+        AnomalyNteEntityPageResultV1 result{sizeof(result)};
+        if (service->page(service->user, &request, page.data(), &result).code !=
+                ANOMALY_STATUS_V1_OK ||
+            result.generation != frame.generation || result.returned == 0) {
+            break;
+        }
+        for (std::uint32_t index{}; index < result.returned; ++index) {
+            const auto& snapshot = page[index];
+            if ((snapshot.flags & ANOMALY_NTE_SNAPSHOT_V1_VALID) == 0 ||
+                snapshot.entity_id == 0) {
+                continue;
+            }
+            const std::string& class_name = ActorClassName(context, snapshot.class_id);
+            if (class_name.empty()) continue;
+            const auto actor = ObjectAt(
+                context, context.g_objects_address,
+                static_cast<std::uint32_t>(snapshot.entity_id - 1U));
+            if (actor == 0) continue;
+            const double dx = snapshot.bounds_center[0] - frame.camera_position[0];
+            const double dy = snapshot.bounds_center[1] - frame.camera_position[1];
+            const Candidate candidate{actor, class_name, std::sqrt(dx * dx + dy * dy)};
+            all.push_back(candidate);
+            if (MatchesSafeClass(class_name)) safes.push_back(candidate);
+        }
+        offset = result.next_offset > offset ? result.next_offset : offset + result.returned;
+    }
+    std::sort(
+        all.begin(), all.end(),
+        [](const Candidate& left, const Candidate& right) {
+            return left.distance < right.distance;
+        });
+    std::sort(
+        safes.begin(), safes.end(),
+        [](const Candidate& left, const Candidate& right) {
+            return left.distance < right.distance;
+        });
+    const auto keep = std::min(all.size(), kNearActorReportLines);
+    nearest.assign(all.begin(), all.begin() + static_cast<std::ptrdiff_t>(keep));
+    Log(
+        context, "probe actor frame actors=" + std::to_string(frame.entity_count) +
+                     " safes=" + std::to_string(safes.size()));
     return true;
 }
 
@@ -1034,6 +1192,236 @@ void RunTriggerInteract(
         "status.trigger", "TriggerInteract {1} on {0}", Views(arguments)));
 }
 
+// Method 5 - a world safe, locker or vault. BoxAuto has no path for these: they are level
+// actors, not resource boxes, so neither the table scan nor the entity frame ever sees them.
+// The probe finds the closest safe-like actor through the actor service, then tries the two
+// calls BoxAuto uses on interactables - the entry chain first, ServerInteract second - and
+// reports which one the game answered.
+void RunSafe(Context& context, std::vector<std::string>& out) {
+    std::vector<Candidate> safes;
+    std::vector<Candidate> nearest;
+    if (!CollectNearbyActors(context, safes, nearest)) {
+        AddError(context, out, "ACTORS", "actor frame");
+        return;
+    }
+    for (const auto& candidate : nearest) {
+        Log(
+            context, "probe near class=" + candidate.class_name + " cm=" +
+                         std::to_string(static_cast<long long>(candidate.distance)));
+    }
+    const Candidate* target{};
+    for (const auto& candidate : safes) {
+        if (candidate.distance <= kSafeTargetRadiusCentimeters) {
+            target = &candidate;
+            break;
+        }
+    }
+    if (target == nullptr) {
+        std::string nearest_class = "n/a";
+        std::string nearest_distance = "n/a";
+        if (!safes.empty()) {
+            nearest_class = safes.front().class_name;
+            nearest_distance = std::to_string(
+                static_cast<long long>(safes.front().distance));
+        } else if (!nearest.empty()) {
+            nearest_class = nearest.front().class_name;
+            nearest_distance = std::to_string(
+                static_cast<long long>(nearest.front().distance));
+        }
+        Log(
+            context, "probe safe none safes=" + std::to_string(safes.size()) +
+                         " nearest=" + nearest_class + " cm=" + nearest_distance);
+        const std::array<std::string, 2> arguments{nearest_class, nearest_distance};
+        AddReportLine(out, context.localizer.Format(
+            "status.safe_none",
+            "No safe within reach; nearest object is {0} at {1} cm",
+            Views(arguments)));
+        return;
+    }
+    if (!GetController(context)) {
+        AddError(context, out, "PROFILE", "ServerInteract");
+        return;
+    }
+    const auto actor = target->actor;
+    std::uintptr_t cls{};
+    Read(context, actor + kObjectClassOffset, cls);
+    std::uintptr_t entries_fn{};
+    std::uintptr_t can_try_fn{};
+    std::vector<std::int32_t> choices;
+    const bool has_fns = cls != 0 &&
+        FindFunction(context, cls, "BPGetInteractEntries", 2, 24, entries_fn) &&
+        FindFunction(context, cls, "BPCanTryInteract", 3, 13, can_try_fn);
+    const bool has_choices = has_fns && ReadInteractChoices(context, actor, entries_fn, choices);
+    std::size_t can_try_total{};
+    bool fired{};
+    std::string choice_used;
+    if (has_choices) {
+        for (const auto choice : choices) {
+            bool can_try{};
+            if (!CanTryInteract(context, actor, choice, can_try_fn, can_try) || !can_try) {
+                continue;
+            }
+            ++can_try_total;
+            if (context.trigger_interact == 0) continue;
+            std::uint8_t params[kTriggerInteractParams]{};
+            std::memcpy(params + 0, &actor, sizeof(actor));
+            std::memcpy(params + 8, &choice, sizeof(choice));
+            params[12] = 0;
+            if (InvokeNative(
+                    context, reinterpret_cast<void*>(context.controller),
+                    reinterpret_cast<void*>(context.trigger_interact), params)) {
+                fired = true;
+                choice_used = std::to_string(choice);
+                break;
+            }
+        }
+    }
+    bool server_fired{};
+    if (!fired && context.server_interact != 0) {
+        std::uint8_t params[kServerInteractParams]{};
+        std::memcpy(params, &actor, sizeof(actor));
+        server_fired = InvokeProcessEvent(
+            context, reinterpret_cast<void*>(context.controller),
+            reinterpret_cast<void*>(context.server_interact), params);
+    }
+    std::string choice_list;
+    for (std::size_t index{}; index < choices.size() && index < 8; ++index) {
+        if (!choice_list.empty()) choice_list.push_back(',');
+        choice_list += std::to_string(choices[index]);
+    }
+    Log(
+        context, "probe safe actor=" + Hex(actor) + " class=" + target->class_name +
+                     " cm=" + std::to_string(static_cast<long long>(target->distance)) +
+                     " fns=" + std::to_string(has_fns ? 1 : 0) + " entries=" +
+                     std::to_string(choices.size()) + " [" + choice_list + "] can_try=" +
+                     std::to_string(can_try_total) + " fired=" +
+                     std::to_string(fired ? 1 : 0) + " server=" +
+                     std::to_string(server_fired ? 1 : 0));
+    if (!fired && !server_fired) {
+        const std::array<std::string, 3> arguments{
+            std::to_string(has_fns ? 1 : 0), std::to_string(choices.size()),
+            std::to_string(can_try_total)};
+        AddReportLine(out, context.localizer.Format(
+            "status.safe_miss",
+            "Safe did not answer: functions {0}, entries {1}, can-try {2}, ServerInteract 0",
+            Views(arguments)));
+        return;
+    }
+    BeginVerify(context, actor, cls, target->class_name);
+    const std::array<std::string, 2> arguments{
+        target->class_name, std::to_string(static_cast<long long>(target->distance))};
+    AddReportLine(out, context.localizer.Format(
+        "status.safe_sent", "Interacted with {0} ({1} cm), checking in 3 s", Views(arguments)));
+}
+
+// Skips the lock-picking minigame. A world safe is not looted by interacting: the interact
+// call only opens the minigame, and the safe yields when that minigame reports success. The
+// blueprint exposes that report as its own event (BP_ClientUnlockTreasureBox, then
+// BP_OnOpenSuccess / BP_OnOpen on the variants that carry them), so calling it directly is
+// the same thing the minigame would have done, minus the minigame.
+void RunUnlock(Context& context, std::vector<std::string>& out) {
+    std::vector<Candidate> safes;
+    std::vector<Candidate> nearest;
+    if (!CollectNearbyActors(context, safes, nearest)) {
+        AddError(context, out, "ACTORS", "actor frame");
+        return;
+    }
+    const Candidate* target{};
+    for (const auto& candidate : safes) {
+        if (candidate.distance <= kSafeTargetRadiusCentimeters) {
+            target = &candidate;
+            break;
+        }
+    }
+    if (target == nullptr) {
+        std::string nearest_class = "n/a";
+        std::string nearest_distance = "n/a";
+        if (!safes.empty()) {
+            nearest_class = safes.front().class_name;
+            nearest_distance = std::to_string(
+                static_cast<long long>(safes.front().distance));
+        } else if (!nearest.empty()) {
+            nearest_class = nearest.front().class_name;
+            nearest_distance = std::to_string(
+                static_cast<long long>(nearest.front().distance));
+        }
+        Log(
+            context, "probe unlock none safes=" + std::to_string(safes.size()) +
+                         " nearest=" + nearest_class + " cm=" + nearest_distance);
+        const std::array<std::string, 2> arguments{nearest_class, nearest_distance};
+        AddReportLine(out, context.localizer.Format(
+            "status.unlock_none",
+            "No safe within reach; nearest object is {0} at {1} cm",
+            Views(arguments)));
+        return;
+    }
+    const auto actor = target->actor;
+    std::uintptr_t cls{};
+    Read(context, actor + kObjectClassOffset, cls);
+    // Server_UnLockTreasureBox is what the game's own lock-picking widget sends once the
+    // mini-game is won, so it is the faithful short cut. The actor events behind it are the
+    // fallbacks, in the order the blueprint graph would reach them.
+    struct Step final {
+        bool on_controller;
+        std::string_view name;
+        std::uint8_t parms;
+        std::uint16_t size;
+    };
+    static constexpr std::array<Step, 6> steps{{
+        {true, "Server_UnLockTreasureBox", 1, 8},
+        {false, "BP_UnlockTreasureBox", 0, 0},
+        {false, "BP_ClientUnlockTreasureBox", 0, 0},
+        {false, "BP_OnOpenSuccess", 0, 0},
+        {false, "BP_OpenTreasureBox", 1, 8},
+        {false, "BP_Open", 0, 0},
+    }};
+    GetController(context);
+    std::uintptr_t controller_cls{};
+    if (context.controller != 0) {
+        Read(context, context.controller + kObjectClassOffset, controller_cls);
+    }
+    std::string found;
+    std::string used;
+    bool fired{};
+    for (const auto& step : steps) {
+        const auto owner_class = step.on_controller ? controller_cls : cls;
+        const auto owner = step.on_controller ? context.controller : actor;
+        std::uintptr_t function{};
+        if (owner_class == 0 ||
+            !FindFunction(context, owner_class, step.name, step.parms, step.size, function)) {
+            continue;
+        }
+        if (!found.empty()) found.push_back(',');
+        found.append(step.name);
+        if (fired) continue;
+        std::uint8_t params[16]{};
+        if (step.size >= sizeof(actor)) std::memcpy(params, &actor, sizeof(actor));
+        if (InvokeProcessEvent(
+                context, reinterpret_cast<void*>(owner),
+                reinterpret_cast<void*>(function), params)) {
+            fired = true;
+            used = std::string(step.name);
+        }
+    }
+    Log(
+        context, "probe unlock actor=" + Hex(actor) + " class=" + target->class_name +
+                     " cm=" + std::to_string(static_cast<long long>(target->distance)) +
+                     " found=[" + found + "] fired=" + std::to_string(fired ? 1 : 0) +
+                     " used=" + used);
+    if (!fired) {
+        const std::array<std::string, 2> arguments{
+            target->class_name, found.empty() ? std::string("none") : found};
+        AddReportLine(out, context.localizer.Format(
+            "status.unlock_miss",
+            "{0} exposes no unlock event (found {1})", Views(arguments)));
+        return;
+    }
+    BeginVerify(context, actor, cls, target->class_name);
+    const std::array<std::string, 2> arguments{target->class_name, used};
+    AddReportLine(out, context.localizer.Format(
+        "status.unlock_sent", "Called {1} on {0}, checking in 3 s", Views(arguments)));
+}
+
 // Method 3 - BoxAuto's food path: it never touches the actor for these, it asks the Host for
 // request_nearby(radius 600, one item) and reads the confirmation off the pickup snapshot.
 void RunHostPickup(
@@ -1207,7 +1595,23 @@ void CompleteVerify(Context& context) {
     const bool read =
         Read(context, actor + InteractFinishOffset(context, cls), current);
     const bool alive = IsObjectAlive(context, context.g_objects_address, actor);
-    const bool opened = (read && current != baseline) || !alive;
+    // The treasure box lineage answers this directly, which is far less ambiguous than the
+    // interaction bit: it is the flag the game itself uses to hide an already-looted box.
+    std::uint8_t opened_flag{};
+    bool opened_known{};
+    std::uintptr_t getter{};
+    if (cls != 0 &&
+        FindFunction(context, cls, "BP_IsTreasureBoxOpened", 1, 1, getter)) {
+        std::uint8_t params[4]{};
+        if (InvokeProcessEvent(
+                context, reinterpret_cast<void*>(actor),
+                reinterpret_cast<void*>(getter), params)) {
+            opened_flag = params[0];
+            opened_known = true;
+        }
+    }
+    const bool opened = (read && current != baseline) || !alive ||
+        (opened_known && opened_flag != 0);
     const std::string verdict =
         opened ? context.localizer.Text("verify.opened", "opened")
                : context.localizer.Text("verify.unchanged", "unchanged");
@@ -1222,7 +1626,8 @@ void CompleteVerify(Context& context) {
         context, "probe verify actor=" + Hex(actor) + " baseline=" + std::to_string(baseline) +
                      " current=" + (read ? std::to_string(current) : std::string("n/a")) +
                      " alive=" + std::to_string(alive ? 1 : 0) +
-                     " opened=" + std::to_string(opened ? 1 : 0));
+                     " opened=" + std::to_string(opened ? 1 : 0) + " box_open=" +
+                     (opened_known ? std::to_string(opened_flag) : std::string("n/a")));
     std::scoped_lock lock(context.mutex);
     context.report.push_back(line);
 }
@@ -1269,6 +1674,8 @@ AnomalyStatusV1 ANOMALY_CALL Load(
         host, ANOMALY_UE5_NAMES_SERVICE_V1_ID, 1);
     context->entities = Query<AnomalyNteEntitiesServiceV1>(
         host, ANOMALY_NTE_ENTITIES_SERVICE_V1_ID, ANOMALY_NTE_ENTITIES_SERVICE_V1_VERSION);
+    context->actors = Query<AnomalyNteActorsServiceV1>(
+        host, ANOMALY_NTE_ACTORS_SERVICE_V1_ID, ANOMALY_NTE_ACTORS_SERVICE_V1_VERSION);
     context->pickup = Query<AnomalyNtePickupServiceV1>(
         host, ANOMALY_NTE_PICKUP_SERVICE_V1_ID, ANOMALY_NTE_PICKUP_SERVICE_V1_VERSION);
     if (!UiReady(context->ui) || !MemoryReady(context->core) ||
@@ -1322,6 +1729,26 @@ void ANOMALY_CALL Update(void* user, double) {
     // They have to run while the probe is idle, otherwise a press never reports its result.
     CompleteVerify(*context);
     PollPickup(*context);
+    if (!context->actor_probe_done) {
+        context->actor_probe_done = true;
+        std::vector<Candidate> safes;
+        std::vector<Candidate> nearest;
+        if (CollectNearbyActors(*context, safes, nearest)) {
+            for (const auto& candidate : nearest) {
+                Log(
+                    *context, "probe actor near=" + candidate.class_name + " cm=" +
+                                  std::to_string(static_cast<long long>(candidate.distance)));
+            }
+            std::size_t shown{};
+            for (const auto& candidate : safes) {
+                if (shown >= 8) break;
+                Log(
+                    *context, "probe actor safe=" + candidate.class_name + " cm=" +
+                                  std::to_string(static_cast<long long>(candidate.distance)));
+                ++shown;
+            }
+        }
+    }
     {
         std::scoped_lock lock(context->mutex);
         if (context->running == Action::none) {
@@ -1337,18 +1764,22 @@ void ANOMALY_CALL Update(void* user, double) {
         running = context->running;
     }
     std::vector<std::string> out;
-    if (!CollectTargets(*context)) {
-        AddError(*context, out, "ENTITIES", "entity frame");
-        Log(*context, "probe collect targets failed");
-        std::scoped_lock lock(context->mutex);
-        context->running = Action::none;
-        context->report = std::move(out);
-        return;
+    // The safe press walks the actor service instead of the entity frame, so it collects its
+    // own target and must not run the loot collection first.
+    if (running != Action::safe && running != Action::unlock) {
+        if (!CollectTargets(*context)) {
+            AddError(*context, out, "ENTITIES", "entity frame");
+            Log(*context, "probe collect targets failed");
+            std::scoped_lock lock(context->mutex);
+            context->running = Action::none;
+            context->report = std::move(out);
+            return;
+        }
+        Log(
+            *context, "probe collect entities=" + std::to_string(context->scan.entity_count) +
+                          " targets=" + std::to_string(context->scan.candidates.size()) +
+                          " action=" + std::to_string(static_cast<int>(running)));
     }
-    Log(
-        *context, "probe collect entities=" + std::to_string(context->scan.entity_count) +
-                      " targets=" + std::to_string(context->scan.candidates.size()) +
-                      " action=" + std::to_string(static_cast<int>(running)));
     if (running == Action::server_interact) {
         RunServerInteract(*context, context->scan, out);
     } else if (running == Action::trigger_interact) {
@@ -1357,6 +1788,10 @@ void ANOMALY_CALL Update(void* user, double) {
         RunHostPickup(*context, context->scan, out);
     } else if (running == Action::vtable) {
         RunVtable(*context, context->scan, out);
+    } else if (running == Action::safe) {
+        RunSafe(*context, out);
+    } else if (running == Action::unlock) {
+        RunUnlock(*context, out);
     } else {
         RunDiagnostic(*context, context->scan, out);
     }
@@ -1412,6 +1847,20 @@ void ANOMALY_CALL Draw(void* user, const AnomalyUiServiceV1* supplied_ui) {
             ui->user, anomaly::sdk::StringView(vtable_label), 0.0F, 0.0F, 1) != 0) {
         std::scoped_lock lock(context->mutex);
         context->pending = Action::vtable;
+    }
+    const std::string safe_label = context->localizer.Label(
+        "action.safe", "Safe / locker", "pickup-probe-safe");
+    if (ui->button_enabled(
+            ui->user, anomaly::sdk::StringView(safe_label), 0.0F, 0.0F, 1) != 0) {
+        std::scoped_lock lock(context->mutex);
+        context->pending = Action::safe;
+    }
+    const std::string unlock_label = context->localizer.Label(
+        "action.unlock", "Skip the lock mini-game", "pickup-probe-unlock");
+    if (ui->button_enabled(
+            ui->user, anomaly::sdk::StringView(unlock_label), 0.0F, 0.0F, 1) != 0) {
+        std::scoped_lock lock(context->mutex);
+        context->pending = Action::unlock;
     }
     ui->separator(ui->user);
     if (report.empty()) {

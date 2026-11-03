@@ -48,6 +48,10 @@
     {
       "id": "anomaly.nte.pickup",
       "minVersion": 1
+    },
+    {
+      "id": "anomaly.nte.actors",
+      "minVersion": 1
     }
   ],
   "capabilities": [
@@ -56,6 +60,7 @@
     "interop-signature",
     "ue5-names",
     "nte-entity-snapshot",
-    "nte-pickup"
+    "nte-pickup",
+    "nte-actor-snapshot"
   ]
 }
