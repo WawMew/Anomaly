@@ -2,7 +2,7 @@
   "schemaVersion": 2,
   "id": "anomaly.local.box-pickup-probe",
   "name": "Box Pickup Probe",
-  "description": "Temporary probe: one button per pickup path BoxAuto uses (ServerInteract, TriggerInteract, Host pickup) plus the PinkPawHeistESP container vtable call.",
+  "description": "Temporary probe: open world safes through their interaction entries, dispatch the unlock event chain directly, scan every safe on the map and teleport to one.",
   "author": "Anomaly",
   "license": "AGPL-3.0-only",
   "audience": "developer",
@@ -42,15 +42,19 @@
       "minVersion": 1
     },
     {
-      "id": "anomaly.nte.entities",
-      "minVersion": 1
-    },
-    {
-      "id": "anomaly.nte.pickup",
-      "minVersion": 1
-    },
-    {
       "id": "anomaly.nte.actors",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.nte.session",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.nte.player",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.nte.player-teleport",
       "minVersion": 1
     }
   ],
@@ -59,8 +63,9 @@
     "memory-read",
     "interop-signature",
     "ue5-names",
-    "nte-entity-snapshot",
-    "nte-pickup",
-    "nte-actor-snapshot"
+    "nte-actor-snapshot",
+    "nte-session-snapshot",
+    "nte-player-snapshot",
+    "nte-player-teleport"
   ]
 }
