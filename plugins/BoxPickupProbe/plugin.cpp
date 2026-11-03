@@ -1358,32 +1358,16 @@ void RunUnlock(Context& context, std::vector<std::string>& out) {
     const auto actor = target->actor;
     std::uintptr_t cls{};
     Read(context, actor + kObjectClassOffset, cls);
-    // Server_UnLockTreasureBox is what the game's own lock-picking widget sends once the
-    // mini-game is won, so it is the faithful short cut. The actor events behind it are the
-    // fallbacks, in the order the blueprint graph would reach them.
-    struct Step final {
-        bool on_controller;
-        std::string_view name;
-        std::uint8_t parms;
-        std::uint16_t size;
+    // The chain the blueprint graph walks once the lock mini-game is won, and only that: the two
+    // client events before the multicast only update presentation (measured opened=0), while the
+    // multicast is the call that flips the box (measured opened=1). Server_UnLockTreasureBox is
+    // what the game's own widget sends, but it is a no-op on a non-authoritative client, so it is
+    // not part of this shortcut. Every step is the empty (0 parms / 0 bytes) actor event.
+    static constexpr std::array<std::string_view, 3> steps{
+        "BP_ClientUnlockTreasureBox",
+        "BP_OpenTreasureBox",
+        "NetMulticast_NotifyTreasureBoxUnlock",
     };
-    // HTPointTreasureBoxActor and AHTTreasureBoxActor both declare BP_OpenTreasureBox but with
-    // different signatures (0/0 and 1/8), so both shapes are tried. The safe lineage is the
-    // point flavour, which is why its own (0/0) entry is listed first.
-    static constexpr std::array<Step, 7> steps{{
-        {false, "BP_ClientUnlockTreasureBox", 0, 0},
-        {false, "BP_OpenTreasureBox", 0, 0},
-        {false, "BP_OpenTreasureBox", 1, 8},
-        {false, "NetMulticast_NotifyTreasureBoxUnlock", 0, 0},
-        {false, "BP_OnOpenSuccess", 0, 0},
-        {false, "BP_UnlockTreasureBox", 0, 0},
-        {true, "Server_UnLockTreasureBox", 1, 8},
-    }};
-    GetController(context);
-    std::uintptr_t controller_cls{};
-    if (context.controller != 0) {
-        Read(context, context.controller + kObjectClassOffset, controller_cls);
-    }
     // BP_IsTreasureBoxOpened is the flag the box itself reports; read it between steps so the
     // run stops on the event that actually flipped the box instead of firing all of them.
     auto read_opened = [&](bool& known) -> bool {
@@ -1405,33 +1389,32 @@ void RunUnlock(Context& context, std::vector<std::string>& out) {
     std::string found;
     std::string used;
     bool fired{};
-    for (const auto& step : steps) {
-        const auto owner_class = step.on_controller ? controller_cls : cls;
-        const auto owner = step.on_controller ? context.controller : actor;
+    bool opened{};
+    for (const auto name : steps) {
         std::uintptr_t function{};
-        if (owner_class == 0 ||
-            !FindFunction(context, owner_class, step.name, step.parms, step.size, function)) {
+        if (cls == 0 || !FindFunction(context, cls, name, 0, 0, function)) {
             continue;
         }
         if (!found.empty()) found.push_back(',');
-        found.append(step.name);
-        std::uint8_t params[16]{};
-        if (step.size >= sizeof(actor)) std::memcpy(params, &actor, sizeof(actor));
+        found.append(name);
+        std::uint8_t params[8]{};
         const bool ok = InvokeProcessEvent(
-            context, reinterpret_cast<void*>(owner),
-            reinterpret_cast<void*>(function), params);
+            context, reinterpret_cast<void*>(actor), reinterpret_cast<void*>(function), params);
         bool known{};
         const bool open_now = read_opened(known);
         Log(
-            context, "probe unlock step=" + std::string(step.name) + " parms=" +
-                         std::to_string(step.parms) + " ok=" + std::to_string(ok ? 1 : 0) +
+            context, "probe unlock step=" + std::string(name) + " ok=" +
+                         std::to_string(ok ? 1 : 0) +
                          " opened=" + (known ? std::to_string(open_now ? 1 : 0) : std::string("n/a")));
         if (ok) {
             fired = true;
             if (!used.empty()) used.push_back('+');
-            used.append(step.name);
+            used.append(name);
         }
-        if (known && open_now) break;
+        if (known && open_now) {
+            opened = true;
+            break;
+        }
     }
     Log(
         context, "probe unlock actor=" + Hex(actor) + " class=" + target->class_name +
@@ -1444,6 +1427,13 @@ void RunUnlock(Context& context, std::vector<std::string>& out) {
         AddReportLine(out, context.localizer.Format(
             "status.unlock_miss",
             "{0} exposes no unlock event (found {1})", Views(arguments)));
+        return;
+    }
+    if (opened) {
+        const std::array<std::string, 2> opened_arguments{target->class_name, used};
+        AddReportLine(out, context.localizer.Format(
+            "status.unlock_opened", "Opened {0} with {1}", Views(opened_arguments)));
+        BeginVerify(context, actor, cls, target->class_name);
         return;
     }
     BeginVerify(context, actor, cls, target->class_name);
