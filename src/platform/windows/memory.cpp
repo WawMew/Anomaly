@@ -100,11 +100,13 @@ bool HasRange(std::uintptr_t address, std::size_t size, bool write) {
 
 template <typename T>
 bool ReadLocal(std::uintptr_t address, T& output) {
-    SIZE_T read{};
-    return ReadProcessMemory(
-               GetCurrentProcess(), reinterpret_cast<const void*>(address),
-               &output, sizeof(output), &read) != FALSE &&
-           read == sizeof(output);
+    if (address == 0) return false;
+    __try {
+        std::memcpy(&output, reinterpret_cast<const void*>(address), sizeof(output));
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 std::wstring BaseName(const std::wstring& path) {
@@ -297,14 +299,37 @@ std::vector<std::uintptr_t> ScanSection(
     if (found == sections.end() || found->virtual_size == 0) {
         return {};
     }
-    if (!HasRange(found->base, found->virtual_size, false)) return {};
-    const auto* const mapped = reinterpret_cast<const std::uint8_t*>(found->base);
+    return ScanSection(*found, pattern, limit);
+}
+
+std::vector<std::uintptr_t> ScanSection(
+    const SectionInfo& section,
+    const Pattern& pattern,
+    std::size_t limit) {
+    if (section.virtual_size == 0 || !HasRange(section.base, section.virtual_size, false)) return {};
+    const auto* const mapped = reinterpret_cast<const std::uint8_t*>(section.base);
     const auto offsets = pattern.FindAll(
-        std::span<const std::uint8_t>(mapped, found->virtual_size), limit);
+        std::span<const std::uint8_t>(mapped, section.virtual_size), limit);
     std::vector<std::uintptr_t> addresses;
     addresses.reserve(offsets.size());
     for (const auto offset : offsets) {
-        addresses.push_back(found->base + offset);
+        addresses.push_back(section.base + offset);
+    }
+    return addresses;
+}
+
+std::vector<std::vector<std::uintptr_t>> ScanSectionBatch(
+    const SectionInfo& section,
+    std::span<const Pattern> patterns,
+    std::size_t limit) {
+    std::vector<std::vector<std::uintptr_t>> addresses(patterns.size());
+    if (section.virtual_size == 0 || !HasRange(section.base, section.virtual_size, false)) return addresses;
+    const auto* const mapped = reinterpret_cast<const std::uint8_t*>(section.base);
+    const auto offsets = Pattern::FindAllBatch(
+        std::span<const std::uint8_t>(mapped, section.virtual_size), patterns, limit);
+    for (std::size_t index = 0; index < offsets.size(); ++index) {
+        addresses[index].reserve(offsets[index].size());
+        for (const auto offset : offsets[index]) addresses[index].push_back(section.base + offset);
     }
     return addresses;
 }
@@ -330,10 +355,12 @@ std::optional<std::vector<std::uint8_t>> ReadMemory(std::uintptr_t address, std:
 
 bool ReadMemoryInto(std::uintptr_t address, void* destination, std::size_t size) {
     if (destination == nullptr || !HasRange(address, size, false)) return false;
-    SIZE_T read{};
-    return ReadProcessMemory(
-               GetCurrentProcess(), reinterpret_cast<const void*>(address), destination, size, &read) != FALSE &&
-           read == size;
+    __try {
+        std::memcpy(destination, reinterpret_cast<const void*>(address), size);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 bool WriteMemory(std::uintptr_t address, const void* source, std::size_t size) {

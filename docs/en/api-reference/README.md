@@ -110,12 +110,13 @@ Many functions that return variable-length data use a signature of the form `(..
 | `anomaly.config` | 1 | `configuration` | [config](platform-services.md#anomalyconfig) |
 | `anomaly.storage` | 1 | `storage` | [storage](platform-services.md#anomalystorage) |
 | `anomaly.json` | 1 | `json` | [json](platform-services.md#anomalyjson) |
+| `anomaly.profile` | 1 | `json` | [profile](platform-services.md#anomalyprofile) |
 | `anomaly.runtime-info` | 1 | `runtime-info` | [runtime-info](platform-services.md#anomalyruntime-info) |
 | `anomaly.diagnostics` | 1 | `diagnostics` | [diagnostics](platform-services.md#anomalydiagnostics) |
 | `anomaly.scheduler` | 1 | `scheduler` | [scheduler](platform-services.md#anomalyscheduler) |
 | `anomaly.commands` | 1 | `commands` | [commands](platform-services.md#anomalycommands) |
 | `anomaly.notifications` | 1 | `notifications` | [notifications](platform-services.md#anomalynotifications) |
-| `anomaly.interop.signature` | 1 | `interop-signature` | [signature](interop-and-memory.md#anomalyinteropsignature) |
+| `anomaly.interop.signature` | 1 / 2 / 3 | `interop-signature` | [signature](interop-and-memory.md#anomalyinteropsignature) |
 | `anomaly.interop.hook` | 1 | `interop-hook` | [hook](interop-and-memory.md#anomalyinterophook) |
 | `anomaly.interop.patch` | 1 | `interop-patch` | [patch](interop-and-memory.md#anomalyinteroppatch) |
 | `anomaly.ipc` | 1 | `ipc` | [ipc](ipc.md) |
@@ -132,6 +133,7 @@ Many functions that return variable-length data use a signature of the form `(..
 | `anomaly.ue5.names` | 1 | `ue5-names` | [ue5.names](ue5-services.md#anomalyue5names) |
 | `anomaly.ue5.objects` | 1 | `ue5-objects` | [ue5.objects](ue5-services.md#anomalyue5objects) |
 | `anomaly.ue5.world` | 1 | `ue5-world` | [ue5.world](ue5-services.md#anomalyue5world) |
+| `anomaly.ue5.assets` | 1 | `ue5-assets` | [ue5.assets](ue5-services.md#anomalyue5assets) |
 | `anomaly.ue5.streaming-source` | 1 | `ue5-streaming-source` | [ue5.streaming-source](ue5-services.md#anomalyue5streaming-source) |
 | `anomaly.nte.build` | 1 | `nte-build` | [nte.build](nte-services.md#anomalyntebuild) |
 | `anomaly.nte.esc-menu-button` | 1 | `nte-esc-menu-button` | [nte.esc-menu-button](nte-services.md#anomalynteesc-menu-button) |

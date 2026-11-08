@@ -11,7 +11,7 @@ Every plugin directory package must contain `manifest.json` (`schemaVersion` is 
 | Field | Required | Description |
 | --- | --- | --- |
 | `schemaVersion` | ✅ | Constant `2` |
-| `id` | ✅ | Normalized ID: dot-separated lowercase labels (for example `anomaly.example.my-plugin`), 3–255 characters |
+| `id` | ✅ | Plugin ID: `<author>.<plugin>`, exactly two lowercase kebab labels (for example `b1ank.status-bar`, `anomaly.nte-teleport`), 3–128 characters; the first segment is the author namespace, and source-tracking prefixes (`local`, `builtin`, `plugin`), reverse-domain names and any third segment are rejected |
 | `name` | ✅ | Display name, 1–128 characters |
 | `description` | No | Plugin summary, 1–512 characters; the host shows it in the "About" section of the plugin details |
 | `version` | ✅ | SemVer string |
@@ -31,7 +31,7 @@ Every plugin directory package must contain `manifest.json` (`schemaVersion` is 
 
 ```jsonc
 // dependencies[] element
-{ "id": "<qualifiedId>", "version": "<range>", "optional": false }
+{ "id": "<pluginId>", "version": "<range>", "optional": false }
 // services[] element
 { "id": "<qualifiedId>", "minVersion": 1, "optional": false }
 ```
@@ -41,7 +41,7 @@ Every plugin directory package must contain `manifest.json` (`schemaVersion` is 
 ```json
 {
   "schemaVersion": 2,
-  "id": "anomaly.example.my-plugin",
+  "id": "example.my-plugin",
   "name": "My Plugin",
   "description": "Shows current player and session diagnostics.",
   "author": "Me",
@@ -93,6 +93,7 @@ Every required (non-optional) service needs the capability listed in the table b
 | `anomaly.config` | `configuration` |
 | `anomaly.storage` | `storage` |
 | `anomaly.json` | `json` |
+| `anomaly.profile` | `json` |
 | `anomaly.runtime-info` | `runtime-info` |
 | `anomaly.diagnostics` | `diagnostics` |
 | `anomaly.scheduler` | `scheduler` |
@@ -116,6 +117,7 @@ Every required (non-optional) service needs the capability listed in the table b
 | `anomaly.ue5.names` | `ue5-names` |
 | `anomaly.ue5.objects` | `ue5-objects` |
 | `anomaly.ue5.world` | `ue5-world` |
+| `anomaly.ue5.assets` | `ue5-assets` |
 | `anomaly.ue5.streaming-source` | `ue5-streaming-source` |
 | `anomaly.nte.build` | `nte-build` |
 | `anomaly.nte.esc-menu-button` | `nte-esc-menu-button` |

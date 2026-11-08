@@ -1,3 +1,4 @@
+#include "profile_test_setup.hpp"
 #include "plates.cpp"
 #include <iostream>
 
@@ -32,11 +33,14 @@ AnomalyStatusV1 ANOMALY_CALL Query(void* user,AnomalyStringViewV1 id,uint32_t,co
 }
 }
 int main() {
+    LoadTestProfile();
     int failed{};
     const auto check = [&](bool ok,const char* label) { if (!ok) { ++failed; std::cerr << label << '\n'; } };
     TestHost host;
     host.core.user = &host;
     host.core.read_memory = [](void* user,uintptr_t address,AnomalyMutableByteSpanV1 destination) {
+        if(address==reinterpret_cast<uintptr_t>(&MeshEvent))
+            return anomaly::testing::RecordedProcessEventEntry(destination);
         for (const auto& range : static_cast<TestHost*>(user)->memory) if (address >= range.start &&
             address-range.start <= range.size && destination.size <= range.size-(address-range.start)) {
             std::memcpy(destination.data,reinterpret_cast<const void*>(address),destination.size); return Ok();

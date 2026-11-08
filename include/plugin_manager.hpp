@@ -1,6 +1,7 @@
 #pragma once
 
 #include "anomaly/sdk/anomaly_sdk.h"
+#include "anomaly/hook_manager.hpp"
 #include "anomaly/plugin_file_watcher.hpp"
 #include "anomaly/plugin_config_watcher.hpp"
 #include "anomaly/plugin_enablement.hpp"
@@ -103,6 +104,7 @@ struct PluginView {
     std::string status_reason;
     CallbackMetricsView update_metrics;
     CallbackMetricsView draw_metrics;
+    CallbackMetricsView overlay_metrics;
     PluginPlatformDiagnosticsView platform_diagnostics;
 };
 
@@ -124,6 +126,7 @@ struct PluginMaintenanceTiming {
 enum class PluginCallbackEvidenceKind : std::uint8_t {
     Update,
     Draw,
+    Overlay,
 };
 
 struct PluginCallbackEvidence {
@@ -160,7 +163,8 @@ public:
         std::shared_ptr<anomaly::StructuredLogger> logger = {},
         anomaly::HotkeyDispatcher input_dispatcher = {},
         UiResourceWorkerDispatcher ui_resource_worker_dispatcher = {},
-        anomaly::IpcPost ipc_post = {});
+        anomaly::IpcPost ipc_post = {},
+        std::unique_ptr<anomaly::HookBackend> hook_backend = {});
     ~PluginManager();
 
     PluginManager(const PluginManager&) = delete;
@@ -293,6 +297,8 @@ public:
 private:
     struct LoadedPlugin;
     bool LoadCatalogEntry(const anomaly::PluginCatalogEntry& entry);
+    bool LoadStagedCatalogEntry(
+        const anomaly::PluginCatalogEntry& entry, anomaly::PluginShadowResult staged);
     void LogImpl(
         AnomalyCoreLogLevelV1 level,
         std::string message,

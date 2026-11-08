@@ -20,7 +20,7 @@
 
 ## `anomaly.interop.signature`
 
-- **ID**：`"anomaly.interop.signature"` · **版本** 1 / 2 · **capability** `interop-signature`
+- **ID**：`"anomaly.interop.signature"` · **版本** 1 / 2 / 3 · **capability** `interop-signature`
 
 ```c
 typedef struct AnomalySignatureServiceV1 {
@@ -35,6 +35,10 @@ typedef struct AnomalySignatureServiceV1 {
 字节签名（支持 `??`、`4?`、`?F` 通配），唯一命中时写入 `*address`；多匹配返回 `CONFLICT`。
 Lifecycle / Worker 调用会学习指令，原签名零匹配时尝试恢复。v1 保留对象成员和栈位移，
 不更新插件内的字段常量。Game / Render 调用不执行学习、恢复或状态文件 I/O。
+
+学习窗口保留原声明的操作数通配符，只在保留完整指令与固定成员位移后缩短；原完整窗口仍用于消除新版新增的重复前缀。
+共享指令模板可用最多两个直接调用或跳转目标的指令指纹区分；锚点不匹配、候选枚举达到上限或仍有
+歧义时拒绝恢复。缓存中的锚点必须落在已解码的分支指令边界内。
 
 ### 版本 2：同时解析地址与字段布局
 
@@ -66,6 +70,8 @@ AnomalyStatusV1 (ANOMALY_CALL *resolve_layout)(
 每组最多 32 个字段、32 个函数，每函数最多 32 个绑定，pattern 文本最多 1024 字节。
 函数签名从 Windows x64 函数入口开始，以入口 RCX 为对象。框架通过受支持的 MOV / LEA
 追踪对象来源，仅放开绑定的成员位移，保留其他成员、栈位置、普通立即数及指令结构。
+同时识别 MOVSS / MOVSD 的浮点字段读写；XMM 写入不改变通用寄存器的对象来源，直接和间接调用
+均清除易失寄存器的来源。字段宽度变化仍会被拒绝。
 扫描窗口最多 128 字节，至少 4 条完整指令、16 个固定字节；原签名仍然精确命中的函数按原签名
 唯一性验收，由学习记录恢复的函数若不足 24 个固定字节，其每个字段都必须有另一个不同函数
 地址给出一致结果。同一字段的所有提取点和函数证据必须一致，并满足 alignment；歧义返回
@@ -87,6 +93,20 @@ prologue 打散）在成功结果里发布为地址 0，且不提供字段证据
 C++ 插件可使用 [`anomaly/sdk/signature.hpp`](../../include/anomaly/sdk/signature.hpp) 中的
 `FieldSeed` / `MemberUse` / `Witness` 声明及 `ResolveLayout`。返回快照由插件本地持有，
 `address(id)` / `offset(id)` 查找不扫描、不访问磁盘；查询未声明的 ID 会抛出 `std::out_of_range`。
+
+### 版本 3：批量解析签名
+
+查询版本 3 返回 `AnomalySignatureServiceV3`，保留 V1 `resolve` 和 V2 `resolve_layout`，
+追加 `resolve_batch`。它在 Lifecycle / Worker 中对同一模块和节区的最多 128 条签名
+批量扫描，逐条返回 `OK`、`NOT_FOUND` 或 `CONFLICT` 及唯一地址；原有学习和恢复仍逐条生效。
+旧版宿主或不支持批量的调用方继续使用 V1/V2。
+
+```c
+AnomalyStatusV1 (ANOMALY_CALL *resolve_batch)(
+    void* user, AnomalyStringViewV1 module_name, AnomalyStringViewV1 section_name,
+    const AnomalyStringViewV1* patterns, uint32_t count,
+    uint32_t* status_codes, uintptr_t* addresses);
+```
 
 ---
 
@@ -126,7 +146,11 @@ typedef struct AnomalyHookServiceV1 {
 | `end_callback(callback_lease)` | 退出 detour 时归还租约 |
 
 > [!IMPORTANT]
-> detour 实现**必须**以 `begin_callback` / `end_callback` 成对包围，宿主借此在停止 / 卸载时安全 drain。当前实现的 hook kind 以 `ANOMALY_HOOK_V1_FUNCTION` 为主。有 Owner 的 HookManager 只启停并回收自身 hook，不使用全局开关。
+> detour 实现**必须**以 `begin_callback` / `end_callback` 成对包围，宿主借此在停止 / 卸载时安全 drain。
+> `begin_callback` 失败时仍应执行原函数，但不得继续运行插件自己的 hook 逻辑。插件应在 `on_stop`
+> 中主动释放 hook；宿主会在该回调之后回收剩余 hook 作为兜底。停止流程冻结新回调后，
+> `end_callback` 仍必须能结束此前取得的回调租约。当前实现的 hook kind 以
+> `ANOMALY_HOOK_V1_FUNCTION` 为主。有 Owner 的 HookManager 只启停并回收自身 hook，不使用全局开关。
 
 ---
 

@@ -20,7 +20,7 @@ See [`anomaly.core`](lifecycle-and-core.md#anomalycore) for the signature. New p
 
 ## `anomaly.interop.signature`
 
-- **ID**: `"anomaly.interop.signature"` · **Version** 1 / 2 · **capability** `interop-signature`
+- **ID**: `"anomaly.interop.signature"` · **Version** 1 / 2 / 3 · **capability** `interop-signature`
 
 ```c
 typedef struct AnomalySignatureServiceV1 {
@@ -37,6 +37,16 @@ byte signature within the given module / section (supporting `??`, `4?`, `?F` wi
 instructions and attempt recovery when the original signature has zero matches. v1 preserves object
 members and stack displacements and does not update field constants inside the plugin. Game / Render
 calls perform no learning, recovery, or state file I/O.
+
+Learned windows preserve declared operand wildcards and are shortened only after retaining the
+declaration's complete instructions and fixed member displacements. The full window remains
+available to distinguish newly duplicated prefixes.
+Shared instruction templates can require up to two direct call or branch target fingerprints.
+Mismatched anchors, truncated candidate enumeration and unresolved ambiguity reject recovery.
+Persisted anchors must identify decoded branch instruction boundaries.
+
+Member learning also recognizes MOVSS/MOVSD scalar reads and writes. XMM writes preserve general
+register object tracking; direct and indirect calls invalidate volatile aliases. Width changes fail.
 
 ### Version 2: resolve addresses and field layouts together
 
@@ -96,6 +106,21 @@ C++ plugins can use the `FieldSeed` / `MemberUse` / `Witness` declarations and `
 locally by the plugin; `address(id)` / `offset(id)` lookups perform no scanning and no disk access;
 querying an undeclared ID throws `std::out_of_range`.
 
+### Version 3: batched signature resolution
+
+Querying version 3 returns `AnomalySignatureServiceV3`, retaining V1 `resolve` and V2
+`resolve_layout` while adding `resolve_batch`. On Lifecycle / Worker, it scans up to 128
+patterns in one module section and reports `OK`, `NOT_FOUND`, or `CONFLICT` plus a unique
+address for each. Existing learning and recovery still apply per pattern. Older hosts and
+callers continue to use V1/V2.
+
+```c
+AnomalyStatusV1 (ANOMALY_CALL *resolve_batch)(
+    void* user, AnomalyStringViewV1 module_name, AnomalyStringViewV1 section_name,
+    const AnomalyStringViewV1* patterns, uint32_t count,
+    uint32_t* status_codes, uintptr_t* addresses);
+```
+
 ---
 
 ## `anomaly.interop.hook`
@@ -134,7 +159,13 @@ typedef struct AnomalyHookServiceV1 {
 | `end_callback(callback_lease)` | returns the lease when leaving the detour |
 
 > [!IMPORTANT]
-> A detour implementation **must** be wrapped in a paired `begin_callback` / `end_callback`; the host relies on this to drain safely on stop / unload. The current implementation's hook kind is mainly `ANOMALY_HOOK_V1_FUNCTION`. A HookManager that has an owner only starts, stops, and reclaims its own hooks and does not use a global switch.
+> A detour implementation **must** be wrapped in a paired `begin_callback` / `end_callback`; the host
+> relies on this to drain safely on stop / unload. If `begin_callback` fails, the detour must still run
+> the original function but must not continue plugin-owned hook logic. Plugins should release their
+> hooks in `on_stop`; the host revokes any leftovers after that callback as a fallback. Once stop has
+> frozen new callbacks, `end_callback` must still be able to finish a lease acquired earlier. The current
+> implementation's hook kind is mainly `ANOMALY_HOOK_V1_FUNCTION`. A HookManager that has an owner only
+> starts, stops, and reclaims its own hooks and does not use a global switch.
 
 ---
 

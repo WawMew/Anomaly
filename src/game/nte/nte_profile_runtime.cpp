@@ -3,7 +3,6 @@
 
 #include "anomaly/nte_navigation_input_policy.hpp"
 #include "anomaly/nte_ui_buttons.hpp"
-#include "anomaly/nte_vehicle.hpp"
 #include "anomaly/ue5_actor_process_event_hook.hpp"
 #include "anomaly/ue5_damage_function_hook.hpp"
 #include "anomaly/ue5_object_lookup.hpp"
@@ -214,7 +213,8 @@ FeatureValidationResult ValidateCombatReflectionLayout(
         "dataTable.rowMapNum", "dataTable.rowMapNumFree", "dataTable.rowMapMax",
         "dataTable.rowMapElementStride", "dataTable.rowMapRowOffset",
         "dataTable.rowMapInlineFlags", "dataTable.rowMapFlagsData",
-        "dataTable.rowMapFlagsNum", "dataTable.rowMapFlagsMax"});
+        "dataTable.rowMapFlagsNum", "dataTable.rowMapFlagsMax",
+        "gameData.size", "abilityData.size", "skillDamage.size", "abilityCharacter.size", "aiCharacter.size", "playerState.size", "gameplayAbilityTips.size", "gameplayEffectTips.size", "monsterData.size", "abilitySystem.size", "abilitySpawnActor.size", "dataTable.size"});
     if (!required.valid) return required;
 
     const auto value = [&profile](const std::string_view key) {
@@ -242,10 +242,13 @@ FeatureValidationResult ValidateCombatReflectionLayout(
         active_effects_size == 0 || active_effects_size > 4096U ||
         value("activeGameplayEffects.arrayReplicationKey") + sizeof(std::int32_t) > active_effects_size ||
         value("activeGameplayEffects.items") + 16U > active_effects_size ||
-        value("abilitySystem.activeGameplayEffects") + active_effects_size > 0x2588U ||
+        value("abilitySystem.activeGameplayEffects") + active_effects_size >
+            value("abilitySystem.size") ||
         value("buffs.maxCount") == 0 || value("buffs.maxCount") > 4096U ||
-        value("abilitySpawnActor.triggerAbilityHandle") + sizeof(std::int32_t) > 0x4A0U ||
-        value("abilitySpawnActor.savedTriggerSkillCDO") + sizeof(std::uintptr_t) > 0x4A0U) {
+        value("abilitySpawnActor.triggerAbilityHandle") + sizeof(std::int32_t) >
+            value("abilitySpawnActor.size") ||
+        value("abilitySpawnActor.savedTriggerSkillCDO") + sizeof(std::uintptr_t) >
+            value("abilitySpawnActor.size")) {
         return {false, "combat callback layout is internally inconsistent"};
     }
     constexpr std::uint64_t kDamageTextInfoSize = 72U;
@@ -259,23 +262,23 @@ FeatureValidationResult ValidateCombatReflectionLayout(
                                      const std::uint64_t field_size) {
         return value(key) <= structure_size && field_size <= structure_size - value(key);
     };
-    if (!field_fits("gameData.abilityDataAsset", 0x23C0U, 8U) ||
-        !field_fits("abilityData.skillDamageDataTable", 0xD58U, 8U) ||
-        !field_fits("skillDamage.gaName", 0x78U, 8U) ||
-        !field_fits("gameData.characterDataTable", 0x23C0U, 8U) ||
-        !field_fits("gameData.gameplayAbilityTipsDataTable", 0x23C0U, 8U) ||
-        !field_fits("gameData.gameplayEffectTipsDataTable", 0x23C0U, 8U) ||
-        !field_fits("abilityCharacter.abilitySystemComponent", 0x1440U, 8U) ||
-        !field_fits("abilityCharacter.characterConfigId", 0x1D80U, 8U) ||
-        !field_fits("playerState.roleName", 0x470U, 16U) ||
-        !field_fits("gameplayAbilityTips.name", 0xB8U, 16U) ||
-        !field_fits("gameplayAbilityTips.gameplayAbility", 0xB8U, 0x28U) ||
-        !field_fits("gameplayEffectTips.name", 0x88U, 16U) ||
-        !field_fits("gameplayEffectTips.geParamName", 0x88U, 8U) ||
-        !field_fits("monsterData.textName", 0x118U, 16U)) {
+    if (!field_fits("gameData.abilityDataAsset", value("gameData.size"), 8U) ||
+        !field_fits("abilityData.skillDamageDataTable", value("abilityData.size"), 8U) ||
+        !field_fits("skillDamage.gaName", value("skillDamage.size"), 8U) ||
+        !field_fits("gameData.characterDataTable", value("gameData.size"), 8U) ||
+        !field_fits("gameData.gameplayAbilityTipsDataTable", value("gameData.size"), 8U) ||
+        !field_fits("gameData.gameplayEffectTipsDataTable", value("gameData.size"), 8U) ||
+        !field_fits("abilityCharacter.abilitySystemComponent", value("abilityCharacter.size"), 8U) ||
+        !field_fits("abilityCharacter.characterConfigId", value("aiCharacter.size"), 8U) ||
+        !field_fits("playerState.roleName", value("playerState.size"), 16U) ||
+        !field_fits("gameplayAbilityTips.name", value("gameplayAbilityTips.size"), 16U) ||
+        !field_fits("gameplayAbilityTips.gameplayAbility", value("gameplayAbilityTips.size"), 0x28U) ||
+        !field_fits("gameplayEffectTips.name", value("gameplayEffectTips.size"), 16U) ||
+        !field_fits("gameplayEffectTips.geParamName", value("gameplayEffectTips.size"), 8U) ||
+        !field_fits("monsterData.textName", value("monsterData.size"), 16U)) {
         return {false, "combat display-name table layout is internally inconsistent"};
     }
-    if (value("dataTable.rowMap") + 0x50U > 0x23C0U ||
+    if (value("dataTable.rowMap") + 0x50U > value("dataTable.size") ||
         value("dataTable.rowMapData") + sizeof(std::uintptr_t) > 0x50U ||
         value("dataTable.rowMapNum") + sizeof(std::int32_t) > 0x50U ||
         value("dataTable.rowMapNumFree") + sizeof(std::int32_t) > 0x50U ||
@@ -415,45 +418,6 @@ FeatureValidationResult ValidateUiButtonsLayout(
     if (!ValidateNteUiButtonsLayout(profile, error)) return {false, std::move(error)};
     return {true, {}};
 }
-
-FeatureValidationResult ValidateNteVehicleLayout(
-    const BuildProfile& profile,
-    const std::string_view feature,
-    const ProfileResolutionSnapshot&,
-    const SymbolMemory&) {
-    if (feature != kNteVehicleFeature) {
-        return {false, "vehicle layout validator used by another feature"};
-    }
-    static constexpr std::array<std::string_view, 40> kRequiredLayout{
-        "world.gameInstance", "gameInstance.localPlayers", "localPlayer.controller",
-        "controller.pawn", "actor.rootComponent", "sceneComponent.location",
-        "object.internalIndex", "object.class", "object.nameOffset", "object.outer",
-        "uclass.classDefaultObject", "ustruct.superStruct", "ustruct.propertyLink",
-        "ufunction.numParms", "ufunction.parmsSize", "ufunction.returnValueOffset",
-        "ffield.name", "ffield.class", "ffieldClass.name", "fproperty.arrayDim",
-        "fproperty.elementSize", "fproperty.offsetInternal", "fproperty.propertyLinkNext",
-        "fobjectProperty.propertyClass", "fstructProperty.struct", "dataTable.rowStruct",
-        "dataTable.rowMap", "dataTable.rowMapData", "dataTable.rowMapNum",
-        "dataTable.rowMapNumFree", "dataTable.rowMapMax", "dataTable.rowMapElementStride",
-        "dataTable.rowMapRowOffset", "dataTable.rowMapFlagsData", "dataTable.rowMapFlagsNum",
-        "dataTable.rowMapFlagsMax", "dataTable.rowMapInlineFlags", "dataTable.maxRows",
-        "vehicle.movementComponent", "vehicle.maxEngineTorque"};
-    for (const std::string_view key : kRequiredLayout) {
-        std::uint64_t value{};
-        if (!ProfileLayoutValue(profile, key, &value) || value > 64U * 1024U * 1024U) {
-            return {false, "vehicle layout is incomplete or exceeds the supported bound"};
-        }
-    }
-    std::uint64_t movement_offset{}, torque_offset{};
-    if (!ProfileLayoutValue(profile, "vehicle.movementComponent", &movement_offset) ||
-        movement_offset != 888U ||
-        !ProfileLayoutValue(profile, "vehicle.maxEngineTorque", &torque_offset) ||
-        torque_offset != 2616U) {
-        return {false, "vehicle offsets do not match the supplied 5.6.1-0+UE5-HT dump"};
-    }
-    return {true, {}};
-}
-
 
 FeatureValidationResult ValidatePickupLayout(
     const BuildProfile& profile,
@@ -604,22 +568,27 @@ FeatureValidationResult ValidateNavigationInputAbi(
         0x48, 0x83, 0xEC, 0x20});
     constexpr auto kPatchedPrologueSuffix = std::to_array<std::uint8_t>({
         0x18, 0x57, 0x48, 0x83, 0xEC, 0x20});
-    constexpr auto kGetPlayerCharacterCall = std::to_array<std::uint8_t>({
-        0x48, 0x8B, 0x03, 0x48, 0x8B, 0xCB, 0xFF, 0x90,
-        0x98, 0x14, 0x00, 0x00, 0x48, 0x8B, 0xD8});
-    constexpr auto kIgnoreMoveCall = std::to_array<std::uint8_t>({
+    // The three virtual dispatch sites stay byte-identical across builds; only the
+    // encoded slot offsets move, and those are compared against the profile below so a
+    // new build needs a Profile change rather than another edit here.
+    constexpr auto kGetPlayerCharacterOpcode = std::to_array<std::uint8_t>({
+        0x48, 0x8B, 0x03, 0x48, 0x8B, 0xCB, 0xFF, 0x90});
+    constexpr auto kGetPlayerCharacterResult = std::to_array<std::uint8_t>({
+        0x48, 0x8B, 0xD8});
+    constexpr auto kIgnoreMoveOpcode = std::to_array<std::uint8_t>({
         0x4C, 0x8B, 0x10, 0x44, 0x0F, 0xB6, 0xCE, 0x41,
         0xB0, 0x01, 0x40, 0x0F, 0xB6, 0xD7, 0x48, 0x8B,
-        0xC8, 0x41, 0xFF, 0x92, 0xD0, 0x0F, 0x00, 0x00});
-    constexpr auto kLimitInputCall = std::to_array<std::uint8_t>({
+        0xC8, 0x41, 0xFF, 0x92});
+    constexpr auto kLimitInputOpcode = std::to_array<std::uint8_t>({
         0x48, 0x8B, 0x03, 0x44, 0x0F, 0xB6, 0xCE, 0x41,
         0xB0, 0x01, 0x40, 0x0F, 0xB6, 0xD7, 0x48, 0x8B,
-        0xCB, 0xFF, 0x90, 0x08, 0x10, 0x00, 0x00});
+        0xCB, 0xFF, 0x90});
     if ((!MatchesBytes(memory, target->address, kPrologue) &&
          !MatchesBytes(memory, target->address + 0x0EU, kPatchedPrologueSuffix)) ||
-        !MatchesBytes(memory, target->address + 0x2EU, kGetPlayerCharacterCall) ||
-        !MatchesBytes(memory, target->address + 0x47U, kIgnoreMoveCall) ||
-        !MatchesBytes(memory, target->address + 0x5FU, kLimitInputCall)) {
+        !MatchesBytes(memory, target->address + 0x2EU, kGetPlayerCharacterOpcode) ||
+        !MatchesBytes(memory, target->address + 0x3AU, kGetPlayerCharacterResult) ||
+        !MatchesBytes(memory, target->address + 0x47U, kIgnoreMoveOpcode) ||
+        !MatchesBytes(memory, target->address + 0x5FU, kLimitInputOpcode)) {
         return {false, "navigation input ABI instruction contract changed"};
     }
 
@@ -810,15 +779,18 @@ FeatureValidationResult ValidateEscMenuHooks(
         0x48, 0x03, 0xF8, 0x48, 0x89, 0x7B, 0x20};
     std::uint8_t call_opcode{};
     std::uintptr_t add_menu_page_call_target{};
-    if (!MatchesBytes(
+    std::uint64_t exec_call_offset{};
+    if (!ProfileLayoutValue(profile, "escMenu.execAddMenuPageCallOffset", &exec_call_offset) ||
+        exec_call_offset > module->size ||
+        !MatchesBytes(
             memory, exec_add_menu_page->address + 0x55U,
             kAddMenuPageExecDispatch) ||
         !memory.Read(
-            exec_add_menu_page->address + 0x6EU,
+            exec_add_menu_page->address + exec_call_offset,
             &call_opcode, sizeof(call_opcode)) ||
         call_opcode != 0xE8U ||
         !ResolveRel32Target(
-            memory, exec_add_menu_page->address + 0x6EU, 1U, 5U,
+            memory, exec_add_menu_page->address + exec_call_offset, 1U, 5U,
             &add_menu_page_call_target) ||
         add_menu_page_call_target != add_menu_page->address) {
         return {false, "AddMenuPage Exec wrapper no longer calls the hook target"};
@@ -852,7 +824,6 @@ FeatureLayoutValidatorRegistry NteFeatureLayoutValidators(
     validators.Register(
         std::string(kNavigationInputAbiValidator), ValidateNavigationInputAbi);
     validators.Register(std::string(kPickupLayoutValidator), ValidatePickupLayout);
-    validators.Register(std::string(kNteVehicleLayoutValidator), ValidateNteVehicleLayout);
     validators.Register(
         std::string(kNteUiButtonsLayoutValidator), ValidateUiButtonsLayout);
     validators.Register(
@@ -1477,6 +1448,14 @@ public:
 
         if (selected && !WaitForProfileSections(*selected, stop_token)) {
             return false;
+        }
+
+        if (selected) {
+            std::string failure;
+            if (!SelectProfileLayout(*selected, *memory_, failure)) {
+                diagnostics_.push_back("profile layout unavailable: " + failure);
+                selected.reset();
+            }
         }
 
         SymbolResolverOptions resolver_options;

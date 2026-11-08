@@ -1,3 +1,4 @@
+#include "native_layout.hpp"
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -26,6 +27,8 @@
 #include <vector>
 
 namespace {
+using night999_profile::native_layout;
+using night999_profile::compatibility;
 
 using anomaly::sdk::Localizer;
 using anomaly::sdk::Ok;
@@ -725,6 +728,7 @@ void Content(const AnomalyHostApiV1* host, const AnomalyUiServiceV1* ui) {
 // 生命周期
 // ---------------------------------------------------------------------------
 AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* host, void** context) {
+    if (!night999_profile::LoadCompatibility(host)) return {ANOMALY_STATUS_V1_UNAVAILABLE,0,{}};
     if (host == nullptr || context == nullptr) {
         return StatusCode(ANOMALY_STATUS_V1_INVALID_ARGUMENT);
     }
@@ -877,7 +881,7 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
     }
     *descriptor = {
         sizeof(*descriptor), ANOMALY_PLUGIN_API_V1_MAJOR, ANOMALY_PLUGIN_API_V1_MINOR,
-        StringView("anomaly.local.nte.night999"),
+        StringView("wawmew.night999"),
         StringView("Night 999"), StringView("WawMew"), StringView("0.21.0"),
         Load, Start, Stop, Unload, Update, Draw};
     return Ok();

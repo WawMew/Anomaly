@@ -30,6 +30,8 @@
     "ANOMALY_NOTIFICATIONS_SERVICE_V1_VERSION": 1,
     "ANOMALY_SIGNATURE_SERVICE_V1_VERSION": 1,
     "ANOMALY_SIGNATURE_SERVICE_V2_VERSION": 2,
+    "ANOMALY_SIGNATURE_SERVICE_V3_VERSION": 3,
+    "ANOMALY_SIGNATURE_BATCH_MAX_PATTERNS_V3": 128,
     "ANOMALY_SIGNATURE_LAYOUT_MAX_FIELDS_V2": 32,
     "ANOMALY_SIGNATURE_LAYOUT_MAX_WITNESSES_V2": 32,
     "ANOMALY_HOOK_SERVICE_V1_VERSION": 1,
@@ -44,6 +46,7 @@
     "ANOMALY_UE5_AHUD_SERVICE_V1_VERSION": 1,
     "ANOMALY_UE5_FRAMEWORK_SERVICE_V1_VERSION": 1,
     "ANOMALY_UE5_NAMES_SERVICE_V1_VERSION": 2,
+    "ANOMALY_UE5_ASSETS_SERVICE_V1_VERSION": 1,
     "ANOMALY_UE5_OBJECTS_SERVICE_V1_VERSION": 1,
     "ANOMALY_UE5_WORLD_SERVICE_V1_VERSION": 1,
     "ANOMALY_NTE_BUILD_SERVICE_V1_VERSION": 1,
@@ -53,20 +56,6 @@
     "ANOMALY_NTE_MAP_LANDMARKS_SERVICE_V1_VERSION": 1,
     "ANOMALY_NTE_MAP_LANDMARK_V1_ID_MAX_BYTES": 128,
     "ANOMALY_NTE_MAP_LANDMARK_V1_WORLD_MAX_UTF8_BYTES": 2048,
-    "ANOMALY_NTE_VEHICLE_SERVICE_V1_VERSION": 8,
-    "ANOMALY_NTE_VEHICLE_ID_MAX_UTF8_BYTES": 128,
-    "ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES": 128,
-    "ANOMALY_NTE_VEHICLE_V1_VALID": 1,
-    "ANOMALY_NTE_VEHICLE_V1_HAS_SPEED": 2,
-    "ANOMALY_NTE_VEHICLE_V1_HAS_TOP_SPEED_RATIO": 4,
-    "ANOMALY_NTE_VEHICLE_V1_HAS_WHEEL_FRICTION": 8,
-    "ANOMALY_NTE_VEHICLE_V1_HAS_SUMMON": 16,
-    "ANOMALY_NTE_VEHICLE_V1_HAS_ENGINE_TORQUE_RATIO": 32,
-    "ANOMALY_NTE_VEHICLE_CATALOG_V1_VALID": 1,
-    "ANOMALY_NTE_VEHICLE_SUMMON_V1_HAS_POSITION": 1,
-    "ANOMALY_NTE_VEHICLE_SUMMON_V1_SET_OWNER_TO_PLAYER": 2,
-    "ANOMALY_NTE_VEHICLE_SPEED_TARGET_CURRENT": 1,
-    "ANOMALY_NTE_VEHICLE_SPEED_TARGET_OTHER_LOADED": 2,
     "ANOMALY_NTE_NAVIGATION_SERVICE_V1_VERSION": 1,
     "ANOMALY_NTE_PICKUP_SERVICE_V1_VERSION": 1,
     "ANOMALY_NTE_UI_BUTTONS_SERVICE_V1_VERSION": 1,
@@ -408,6 +397,25 @@
         "ANOMALY_UI_TAB_ITEM_V1_NO_TOOLTIP": 16
       }
     },
+    "AnomalyUiGlassVariantV1": {
+      "size": 4,
+      "alignment": 4,
+      "values": {
+        "ANOMALY_UI_GLASS_V1_REGULAR": 0,
+        "ANOMALY_UI_GLASS_V1_CLEAR": 1,
+        "ANOMALY_UI_GLASS_V1_MATERIAL": 2,
+        "ANOMALY_UI_GLASS_V1_THUMB": 3
+      }
+    },
+    "AnomalyUiGlassFlagsV1": {
+      "size": 4,
+      "alignment": 4,
+      "values": {
+        "ANOMALY_UI_GLASS_V1_NONE": 0,
+        "ANOMALY_UI_GLASS_V1_NO_SHADOW": 1,
+        "ANOMALY_UI_GLASS_V1_NO_RIM": 2
+      }
+    },
     "AnomalyWindowFlagsV1": {
       "size": 4,
       "alignment": 4,
@@ -425,7 +433,8 @@
         "ANOMALY_GLYPH_RANGE_V1_LATIN": 1,
         "ANOMALY_GLYPH_RANGE_V1_CYRILLIC": 2,
         "ANOMALY_GLYPH_RANGE_V1_JAPANESE": 3,
-        "ANOMALY_GLYPH_RANGE_V1_CHINESE_FULL": 4
+        "ANOMALY_GLYPH_RANGE_V1_CHINESE_FULL": 4,
+        "ANOMALY_GLYPH_RANGE_V1_PRIVATE_USE": 5
       }
     },
     "AnomalyFontStateFlagsV1": {
@@ -611,7 +620,7 @@
       }
     },
     "AnomalyPluginDescriptorV1": {
-      "size": 120,
+      "size": 128,
       "alignment": 8,
       "offsets": {
         "struct_size": 0,
@@ -626,7 +635,8 @@
         "on_stop": 88,
         "on_unload": 96,
         "on_update": 104,
-        "on_draw": 112
+        "on_draw": 112,
+        "on_overlay": 120
       }
     },
     "AnomalyCoreServiceV1": {
@@ -721,6 +731,16 @@
         "object_key_at": 88,
         "object_find": 96,
         "serialize": 104
+      }
+    },
+    "AnomalyProfileServiceV1": {
+      "size": 24,
+      "alignment": 8,
+      "offsets": {
+        "struct_size": 0,
+        "service_version": 4,
+        "user": 8,
+        "load": 16
       }
     },
     "AnomalyRuntimeInfoServiceV1": {
@@ -950,6 +970,18 @@
         "resolve_layout": 24
       }
     },
+    "AnomalySignatureServiceV3": {
+      "size": 40,
+      "alignment": 8,
+      "offsets": {
+        "struct_size": 0,
+        "service_version": 4,
+        "user": 8,
+        "resolve": 16,
+        "resolve_layout": 24,
+        "resolve_batch": 32
+      }
+    },
     "AnomalyHookServiceV1": {
       "size": 48,
       "alignment": 8,
@@ -1008,8 +1040,22 @@
         "outline_thickness": 20
       }
     },
+    "AnomalyUiGlassStyleV1": {
+      "size": 32,
+      "alignment": 4,
+      "offsets": {
+        "struct_size": 0,
+        "flags": 4,
+        "variant": 8,
+        "tint_rgba": 12,
+        "rounding": 16,
+        "scale": 20,
+        "opacity": 24,
+        "refraction_scale": 28
+      }
+    },
     "AnomalyUiServiceV1": {
-      "size": 368,
+      "size": 448,
       "alignment": 8,
       "offsets": {
         "struct_size": 0,
@@ -1058,7 +1104,17 @@
         "text_wrapped": 336,
         "begin_child_auto_fit_y": 344,
         "slider_float_enabled": 352,
-        "set_next_item_width": 360
+        "set_next_item_width": 360,
+        "overlay_viewport_size": 368,
+        "overlay_glass": 376,
+        "overlay_rect_filled": 384,
+        "overlay_line": 392,
+        "overlay_circle": 400,
+        "overlay_ring_sector": 408,
+        "overlay_measure_text": 416,
+        "overlay_text": 424,
+        "overlay_glass_ring_sector": 432,
+        "draw_screen_primitives": 440
       }
     },
     "AnomalyWindowSpecV1": {
@@ -1202,7 +1258,7 @@
       }
     },
     "AnomalyTextureServiceV1": {
-      "size": 48,
+      "size": 56,
       "alignment": 8,
       "offsets": {
         "struct_size": 0,
@@ -1211,7 +1267,8 @@
         "request": 16,
         "release": 24,
         "state": 32,
-        "draw": 40
+        "draw": 40,
+        "draw_overlay": 48
       }
     },
     "AnomalyInputServiceV1": {
@@ -1311,6 +1368,48 @@
         "user": 8,
         "resolve_utf8": 16,
         "resolve_ftext_utf8": 24
+      }
+    },
+    "AnomalyModEntryV1": {
+      "size": 96,
+      "alignment": 8,
+      "offsets": {
+        "struct_size": 0,
+        "enabled": 4,
+        "disabled_files": 8,
+        "index_complete": 12,
+        "key": 16,
+        "name": 32,
+        "vehicles": 48,
+        "analysis_error": 64,
+        "resource_groups": 80
+      }
+    },
+    "AnomalyModsServiceV1": {
+      "size": 56,
+      "alignment": 8,
+      "offsets": {
+        "struct_size": 0,
+        "service_version": 4,
+        "user": 8,
+        "compatibility_mode": 16,
+        "enumerate": 24,
+        "set_enabled": 32,
+        "assets": 40,
+        "synchronize": 48
+      }
+    },
+    "AnomalyUe5AssetsServiceV1": {
+      "size": 48,
+      "alignment": 8,
+      "offsets": {
+        "struct_size": 0,
+        "service_version": 4,
+        "user": 8,
+        "prepare_class": 16,
+        "enumerate_derived": 24,
+        "prepare_string_table": 32,
+        "enumerate_string_table": 40
       }
     },
     "AnomalyUe5ObjectSnapshotV1": {
@@ -1581,81 +1680,6 @@
         "user": 8,
         "move_to_location": 16,
         "stop_movement": 24
-      }
-    },
-    "AnomalyNteVehicleSnapshotV1": {
-      "size": 192,
-      "alignment": 8,
-      "offsets": {
-        "struct_size": 0,
-        "flags": 4,
-        "vehicle": 8,
-        "speed_kmh": 24,
-        "top_speed_ratio": 32,
-        "wheel_friction_enabled": 36,
-        "engine_torque_ratio": 40,
-        "vehicle_entity_id": 48,
-        "vehicle_class_name": 56
-      }
-    },
-    "AnomalyNteVehicleCatalogSnapshotV1": {
-      "size": 24,
-      "alignment": 8,
-      "offsets": {
-        "struct_size": 0,
-        "flags": 4,
-        "sequence": 8,
-        "entry_count": 16,
-        "reserved": 20
-      }
-    },
-    "AnomalyNteVehicleSummonRequestV1": {
-      "size": 64,
-      "alignment": 8,
-      "offsets": {
-        "struct_size": 0,
-        "flags": 4,
-        "world_position": 8
-      }
-    },
-    "AnomalyNteVehicleSpeedTargetV1": {
-      "size": 16,
-      "alignment": 4,
-      "offsets": {
-        "struct_size": 0,
-        "scope": 4,
-        "top_speed_kmh": 8,
-        "minimum_speed_kmh": 12
-      }
-    },
-    "AnomalyNteVehicleServiceV1": {
-      "size": 184,
-      "alignment": 8,
-      "offsets": {
-        "struct_size": 0,
-        "service_version": 4,
-        "user": 8,
-        "snapshot": 16,
-        "set_top_speed_ratio": 24,
-        "set_wheel_friction_enabled": 32,
-        "reset": 40,
-        "catalog_snapshot": 48,
-        "vehicle_id_at": 56,
-        "set_summon_vehicle_id": 64,
-        "summon_vehicle": 72,
-        "set_engine_torque_ratio": 80,
-        "refresh_catalog": 88,
-        "catalog_label_at": 96,
-        "set_other_vehicles_top_speed_ratio": 104,
-        "set_other_vehicles_engine_torque_ratio": 112,
-        "set_other_vehicles_min_speed_ratio": 120,
-        "authorize_fine_speed_tuning": 128,
-        "set_fine_speed_tuning_enabled": 136,
-        "revoke_fine_speed_authorization": 144,
-        "customization_catalog_snapshot": 152,
-        "customization_option_at": 160,
-        "repair_current_vehicle": 168,
-        "set_speed_target": 176
       }
     },
     "AnomalyNtePickupRequestV1": {
@@ -2199,6 +2223,7 @@
     { "id": "anomaly.config", "version": 1, "table": "AnomalyConfigServiceV1" },
     { "id": "anomaly.storage", "version": 1, "table": "AnomalyStorageServiceV1" },
     { "id": "anomaly.json", "version": 1, "table": "AnomalyJsonServiceV1" },
+    { "id": "anomaly.profile", "version": 1, "table": "AnomalyProfileServiceV1" },
     { "id": "anomaly.runtime-info", "version": 1, "table": "AnomalyRuntimeInfoServiceV1" },
     { "id": "anomaly.diagnostics", "version": 1, "table": "AnomalyDiagnosticsServiceV1" },
     { "id": "anomaly.scheduler", "version": 1, "table": "AnomalySchedulerServiceV1" },
@@ -2208,6 +2233,7 @@
     { "id": "anomaly.notifications", "version": 1, "table": "AnomalyNotificationsServiceV1" },
     { "id": "anomaly.interop.signature", "version": 1, "table": "AnomalySignatureServiceV1" },
     { "id": "anomaly.interop.signature", "version": 2, "table": "AnomalySignatureServiceV2" },
+    { "id": "anomaly.interop.signature", "version": 3, "table": "AnomalySignatureServiceV3" },
     { "id": "anomaly.interop.hook", "version": 1, "table": "AnomalyHookServiceV1" },
     { "id": "anomaly.interop.patch", "version": 1, "table": "AnomalyPatchServiceV1" },
     { "id": "anomaly.ui", "version": 1, "table": "AnomalyUiServiceV1" },
@@ -2220,6 +2246,8 @@
     { "id": "anomaly.ue5.ahud", "version": 1, "table": "AnomalyUe5AhudServiceV1" },
     { "id": "anomaly.ue5.framework", "version": 1, "table": "AnomalyUe5FrameworkServiceV1" },
     { "id": "anomaly.ue5.process-event", "version": 1, "table": "AnomalyUe5ProcessEventServiceV1" },
+    { "id": "anomaly.mods", "version": 1, "table": "AnomalyModsServiceV1" },
+    { "id": "anomaly.ue5.assets", "version": 1, "table": "AnomalyUe5AssetsServiceV1" },
     { "id": "anomaly.ue5.names", "version": 2, "table": "AnomalyUe5NamesServiceV1" },
     { "id": "anomaly.ue5.objects", "version": 1, "table": "AnomalyUe5ObjectsServiceV1" },
     { "id": "anomaly.ue5.world", "version": 1, "table": "AnomalyUe5WorldServiceV1" },
@@ -2231,7 +2259,6 @@
     { "id": "anomaly.nte.player-hold", "version": 1, "table": "AnomalyNtePlayerHoldServiceV1" },
     { "id": "anomaly.nte.map-landmarks", "version": 1, "table": "AnomalyNteMapLandmarksServiceV1" },
     { "id": "anomaly.nte.navigation", "version": 1, "table": "AnomalyNteNavigationServiceV1" },
-    { "id": "anomaly.nte.vehicle", "version": 8, "table": "AnomalyNteVehicleServiceV1" },
     { "id": "anomaly.nte.pickup", "version": 1, "table": "AnomalyNtePickupServiceV1" },
     { "id": "anomaly.nte.ui-buttons", "version": 1, "table": "AnomalyNteUiButtonsServiceV1" },
     { "id": "anomaly.nte.entities", "version": 1, "table": "AnomalyNteEntitiesServiceV1" },

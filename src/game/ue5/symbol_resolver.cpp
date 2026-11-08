@@ -1,5 +1,7 @@
 #include "anomaly/symbol_resolver.hpp"
+#include "anomaly/artifact_crypto.hpp"
 #include "anomaly/signature_updater.hpp"
+#include "pattern.hpp"
 
 #include <algorithm>
 #include <array>
@@ -7,11 +9,40 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <utility>
 
 namespace anomaly {
 namespace {
+
+// Learned recipes are keyed by the declaration they were learned for. Hashing the whole
+// profile meant that editing a single layout value threw away every symbol's recipe and
+// silently dropped the resolver back to plain pattern matching; hashing the declaration
+// itself keeps the knowledge across layout and feature edits while still refusing to
+// reuse a recipe after the pattern or its resolve rule changed.
+std::string SymbolDeclarationContract(const ProfileSymbol& symbol) {
+    std::string text;
+    text.reserve(symbol.pattern.size() + symbol.section.size() + 96);
+    text += symbol.section;
+    text.push_back('\n');
+    text += symbol.pattern;
+    text.push_back('\n');
+    text += std::to_string(static_cast<int>(symbol.resolve.kind));
+    text.push_back(':');
+    text += std::to_string(symbol.resolve.offset);
+    text.push_back(':');
+    text += std::to_string(symbol.resolve.instruction_size);
+    text.push_back(':');
+    text += std::to_string(symbol.resolve.addend);
+    text.push_back('\n');
+    for (const auto& validator : symbol.validators) {
+        text += validator;
+        text.push_back(',');
+    }
+    const auto digest = Sha256Hex(std::as_bytes(std::span(text)));
+    return "symbol:" + digest.substr(0, 32);
+}
 
 bool IsReadableProtection(DWORD protection) noexcept {
     if ((protection & (PAGE_GUARD | PAGE_NOACCESS)) != 0) return false;
@@ -182,6 +213,8 @@ bool FiniteVector(const std::array<double, 3>& values) noexcept {
 }
 
 bool RuntimeObjectInitializationPending(const std::string_view message) noexcept {
+    // These results depend on game-owned objects which may finish initializing
+    // after the signature and static layout have already been validated.
     return message == "world pointer is null" ||
         message == "world game instance is null" ||
         message == "world persistent level is null" ||
@@ -190,6 +223,11 @@ bool RuntimeObjectInitializationPending(const std::string_view message) noexcept
         message == "object registry is not initialized" ||
         message == "local player chain is incomplete" ||
         message == "actor bounds shape is implausible" ||
+        message == "game instance local players is null" ||
+        message == "level actors is null" ||
+        message == "world levels is null" ||
+        message == "player scene location is not finite" ||
+        message == "world level entry is null" ||
         message.ends_with(" is unreadable");
 }
 
@@ -878,7 +916,7 @@ FeatureValidationResult ValidateNteEntitiesLayout(
         }
         if (class_object == 0) continue;
         if (!ValidatePointer(memory, class_object, "actor class", error)) {
-            return {false, std::move(error)};
+            return FeatureFailure(std::move(error));
         }
         std::int32_t class_index{};
         std::uint32_t class_name{};
@@ -886,7 +924,7 @@ FeatureValidationResult ValidateNteEntitiesLayout(
                     "actor class internal index", error) ||
             !ReadAt(memory, class_object, name_offset, class_name,
                     "actor class name", error)) {
-            return {false, std::move(error)};
+            return FeatureFailure(std::move(error));
         }
         if (!FiniteVector(bounds_origin) || !FiniteVector(bounds_extent) ||
             std::ranges::any_of(bounds_extent, [](double value) {
@@ -1247,10 +1285,13 @@ void ResolveFeatures(
     const BuildProfile& profile,
     ProfileResolutionSnapshot& snapshot,
     const SymbolMemory& memory,
-    const FeatureLayoutValidatorRegistry& layout_validators) {
+    const FeatureLayoutValidatorRegistry& layout_validators,
+    const bool preserve_available = false) {
     enum class VisitState : std::uint8_t { Unvisited, Visiting, Completed };
 
-    snapshot.features.clear();
+    decltype(snapshot.features) previous_features;
+    if (preserve_available) previous_features.swap(snapshot.features);
+    else snapshot.features.clear();
     std::map<std::string, VisitState, std::less<>> visits;
     std::function<void(const std::string&)> resolve_feature;
     resolve_feature = [&](const std::string& id) {
@@ -1261,6 +1302,14 @@ void ResolveFeatures(
         if (visit == VisitState::Visiting) return;
 
         visits[id] = VisitState::Visiting;
+        if (const auto previous = previous_features.find(id);
+            previous != previous_features.end() && previous->second.available) {
+            // A validated capability is stable for this immutable Profile. A later
+            // world transition may temporarily remove its game-owned objects.
+            snapshot.features.emplace(id, previous->second);
+            visits[id] = VisitState::Completed;
+            return;
+        }
         FeatureResolution feature;
         feature.id = id;
         bool validator_failed{};
@@ -1339,6 +1388,43 @@ void ResolveFeatures(
 }
 
 }  // namespace
+
+bool SelectProfileLayout(BuildProfile& profile, const SymbolMemory& memory, std::string& error) {
+    error.clear();
+    if (profile.layout_candidates.empty()) return true;
+    const ProfileLayoutCandidate* selected{};
+    for (const auto& candidate : profile.layout_candidates) {
+        const auto module = memory.FindModule(candidate.module);
+        if (!module) continue;
+        const auto matches = memory.Scan(*module, candidate.section, candidate.pattern, 2);
+        if (matches.size() > 1) {
+            error = "layout signature is ambiguous";
+            return false;
+        }
+        if (matches.empty() || candidate.entry.empty()) continue;
+        std::vector<std::uint8_t> actual(candidate.entry.size());
+        if (!memory.Read(matches.front(), actual.data(), actual.size()) || actual != candidate.entry)
+            continue;
+        if (selected != nullptr) {
+            error = "multiple layout candidates matched";
+            return false;
+        }
+        selected = &candidate;
+    }
+    if (selected == nullptr) {
+        error = "no layout candidate passed signature and entry validation";
+        return false;
+    }
+    for (const auto& [name, pattern] : selected->symbol_patterns) {
+        if (!profile.symbols.contains(name)) {
+            error = "layout candidate references undeclared symbol " + name;
+            return false;
+        }
+    }
+    for (const auto& [key, value] : selected->values) profile.layout.insert_or_assign(key, value);
+    for (const auto& [name, pattern] : selected->symbol_patterns) profile.symbols.at(name).pattern = pattern;
+    return true;
+}
 
 LiveSymbolMemory::LiveSymbolMemory(CoreMemoryServices services)
     : services_(NormalizeCoreMemoryServices(std::move(services))) {}
@@ -1482,6 +1568,45 @@ SymbolValidationResult SymbolValidatorRegistry::Validate(
     const ue5mem::ModuleInfo& module,
     std::uintptr_t address,
     const SymbolMemory& memory) const {
+    constexpr std::string_view call_prefix = "call-target:";
+    if (id.starts_with(call_prefix)) {
+        const auto arguments = id.substr(call_prefix.size());
+        const auto separator = arguments.find(':');
+        if (separator == std::string_view::npos)
+            return {false, "call-target requires a symbol and layout key"};
+        const auto target = profile.symbols.find(arguments.substr(0, separator));
+        const auto offset = profile.layout.find(arguments.substr(separator + 1));
+        if (target == profile.symbols.end() || offset == profile.layout.end() ||
+            offset->second < 0 || static_cast<std::uint64_t>(offset->second) > module.size ||
+            target->second.module != symbol.module ||
+            target->second.resolve.kind != ProfileResolveKind::Direct ||
+            target->second.resolve.addend != 0)
+            return {false, "call-target declaration is unsupported"};
+        const auto call_offset = static_cast<std::size_t>(offset->second);
+        if (!Contains(module.base, module.size, address, call_offset + 5U))
+            return {false, "call-target instruction is outside the module"};
+        std::array<std::uint8_t, 5> call{};
+        if (!memory.Read(address + call_offset, call.data(), call.size()) || call[0] != 0xE8)
+            return {false, "call-target instruction is not a readable E8 rel32"};
+        std::int32_t displacement{};
+        std::memcpy(&displacement, call.data() + 1, sizeof(displacement));
+        const auto callee = static_cast<std::uintptr_t>(
+            static_cast<std::intptr_t>(address + call_offset + call.size()) + displacement);
+        // Thunks can have identical instruction templates. Their declared
+        // callee distinguishes them without fixing link-dependent rel32 bytes.
+        try {
+            const auto pattern = ue5mem::Pattern::Parse(target->second.pattern);
+            if (!Contains(module.base, module.size, callee, pattern.Size()))
+                return {false, "call-target destination is outside the module"};
+            std::vector<std::uint8_t> bytes(pattern.Size());
+            if (!memory.Read(callee, bytes.data(), bytes.size()) ||
+                pattern.FindAll(bytes, 1) != std::vector<std::size_t>{0})
+                return {false, "call-target destination does not match the declared symbol"};
+        } catch (const std::invalid_argument&) {
+            return {false, "call-target pattern is invalid"};
+        }
+        return {true, {}};
+    }
     constexpr std::string_view prefix = "address-in-section:";
     if (id.starts_with(prefix)) {
         const std::string_view section_name = id.substr(prefix.size());
@@ -1659,7 +1784,7 @@ ProfileResolutionSnapshot SymbolResolver::Resolve(
             [&](auto pattern, auto limit) {
                 return memory_->Scan(*module, definition.section, pattern, limit);
             }};
-        const std::string contract = profile->source_hash + ":" + id;
+        const std::string contract = SymbolDeclarationContract(definition) + ":" + id;
         bool recovery_attempted{};
         bool using_recovery{};
         std::string recovery_pattern;
@@ -1859,7 +1984,7 @@ bool SymbolResolver::RevalidateDeferredCandidates(
     if (profile.features.empty()) {
         if (!changed) return false;
     } else {
-        ResolveFeatures(profile, snapshot, *memory_, feature_layout_validators_);
+        ResolveFeatures(profile, snapshot, *memory_, feature_layout_validators_, true);
     }
     if (!changed && previous_state == snapshot.state &&
         FeatureResolutionsEqual(previous_features, snapshot.features)) {

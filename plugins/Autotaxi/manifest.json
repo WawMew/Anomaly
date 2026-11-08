@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 2,
+  "id": "b1ank.autotaxi",
+  "name": "AutoTaxi",
+  "description": "Automatically complete taxi orders with an optional preferred eligible character passenger.",
+  "author": "b1ank",
+  "license": "AGPL-3.0-only",
+  "version": "0.1.11",
+  "entry": "plugin.dll",
+  "api": {
+    "major": 1,
+    "minMinor": 0,
+    "maxMinor": 0
+  },
+  "games": [
+    "nte"
+  ],
+  "builds": [
+    "nte-*"
+  ],
+  "loadPhase": "game-ready",
+  "services": [
+    {
+      "id": "anomaly.core",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.ui",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.localization",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.window",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.ue5.names",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.ue5.objects",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.ue5.build",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.ue5.framework",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.interop.signature",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.interop.hook",
+      "minVersion": 1,
+      "optional": true
+    },
+    {
+      "id": "anomaly.profile",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.json",
+      "minVersion": 1
+    }
+  ],
+  "capabilities": [
+    "ui",
+    "ui-window",
+    "memory-read",
+    "memory-write",
+    "interop-hook",
+    "ue5-names",
+    "ue5-objects",
+    "ue5-build",
+    "game-events",
+    "interop-signature",
+    "json"
+  ]
+}

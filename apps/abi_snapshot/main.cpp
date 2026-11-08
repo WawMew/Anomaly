@@ -186,6 +186,10 @@ std::string BuildSnapshot() {
     AppendUnsigned(output, ANOMALY_SIGNATURE_SERVICE_V1_VERSION);
     output.append(",\n    \"ANOMALY_SIGNATURE_SERVICE_V2_VERSION\": ");
     AppendUnsigned(output, ANOMALY_SIGNATURE_SERVICE_V2_VERSION);
+    output.append(",\n    \"ANOMALY_SIGNATURE_SERVICE_V3_VERSION\": ");
+    AppendUnsigned(output, ANOMALY_SIGNATURE_SERVICE_V3_VERSION);
+    output.append(",\n    \"ANOMALY_SIGNATURE_BATCH_MAX_PATTERNS_V3\": ");
+    AppendUnsigned(output, ANOMALY_SIGNATURE_BATCH_MAX_PATTERNS_V3);
     output.append(",\n    \"ANOMALY_SIGNATURE_LAYOUT_MAX_FIELDS_V2\": ");
     AppendUnsigned(output, ANOMALY_SIGNATURE_LAYOUT_MAX_FIELDS_V2);
     output.append(",\n    \"ANOMALY_SIGNATURE_LAYOUT_MAX_WITNESSES_V2\": ");
@@ -214,6 +218,8 @@ std::string BuildSnapshot() {
     AppendUnsigned(output, ANOMALY_UE5_FRAMEWORK_SERVICE_V1_VERSION);
     output.append(",\n    \"ANOMALY_UE5_NAMES_SERVICE_V1_VERSION\": ");
     AppendUnsigned(output, ANOMALY_UE5_NAMES_SERVICE_V1_VERSION);
+    output.append(",\n    \"ANOMALY_UE5_ASSETS_SERVICE_V1_VERSION\": ");
+    AppendUnsigned(output, ANOMALY_UE5_ASSETS_SERVICE_V1_VERSION);
     output.append(",\n    \"ANOMALY_UE5_OBJECTS_SERVICE_V1_VERSION\": ");
     AppendUnsigned(output, ANOMALY_UE5_OBJECTS_SERVICE_V1_VERSION);
     output.append(",\n    \"ANOMALY_UE5_WORLD_SERVICE_V1_VERSION\": ");
@@ -232,34 +238,6 @@ std::string BuildSnapshot() {
     AppendUnsigned(output, ANOMALY_NTE_MAP_LANDMARK_V1_ID_MAX_BYTES);
     output.append(",\n    \"ANOMALY_NTE_MAP_LANDMARK_V1_WORLD_MAX_UTF8_BYTES\": ");
     AppendUnsigned(output, ANOMALY_NTE_MAP_LANDMARK_V1_WORLD_MAX_UTF8_BYTES);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_SERVICE_V1_VERSION\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_SERVICE_V1_VERSION);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_ID_MAX_UTF8_BYTES\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_ID_MAX_UTF8_BYTES);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_CLASS_NAME_MAX_UTF8_BYTES);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_V1_VALID\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_V1_VALID);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_V1_HAS_SPEED\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_V1_HAS_SPEED);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_V1_HAS_TOP_SPEED_RATIO\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_V1_HAS_TOP_SPEED_RATIO);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_V1_HAS_WHEEL_FRICTION\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_V1_HAS_WHEEL_FRICTION);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_V1_HAS_SUMMON\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_V1_HAS_SUMMON);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_V1_HAS_ENGINE_TORQUE_RATIO\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_V1_HAS_ENGINE_TORQUE_RATIO);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_CATALOG_V1_VALID\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_CATALOG_V1_VALID);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_SUMMON_V1_HAS_POSITION\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_SUMMON_V1_HAS_POSITION);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_SUMMON_V1_SET_OWNER_TO_PLAYER\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_SUMMON_V1_SET_OWNER_TO_PLAYER);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_SPEED_TARGET_CURRENT\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_SPEED_TARGET_CURRENT);
-    output.append(",\n    \"ANOMALY_NTE_VEHICLE_SPEED_TARGET_OTHER_LOADED\": ");
-    AppendUnsigned(output, ANOMALY_NTE_VEHICLE_SPEED_TARGET_OTHER_LOADED);
     output.append(",\n    \"ANOMALY_NTE_NAVIGATION_SERVICE_V1_VERSION\": ");
     AppendUnsigned(output, ANOMALY_NTE_NAVIGATION_SERVICE_V1_VERSION);
     output.append(",\n    \"ANOMALY_NTE_PICKUP_SERVICE_V1_VERSION\": ");
@@ -692,6 +670,25 @@ std::string BuildSnapshot() {
         false);
     AppendEnum(
         output,
+        "AnomalyUiGlassVariantV1",
+        sizeof(AnomalyUiGlassVariantV1),
+        alignof(AnomalyUiGlassVariantV1),
+        {{"ANOMALY_UI_GLASS_V1_REGULAR", ANOMALY_UI_GLASS_V1_REGULAR},
+         {"ANOMALY_UI_GLASS_V1_CLEAR", ANOMALY_UI_GLASS_V1_CLEAR},
+         {"ANOMALY_UI_GLASS_V1_MATERIAL", ANOMALY_UI_GLASS_V1_MATERIAL},
+         {"ANOMALY_UI_GLASS_V1_THUMB", ANOMALY_UI_GLASS_V1_THUMB}},
+        false);
+    AppendEnum(
+        output,
+        "AnomalyUiGlassFlagsV1",
+        sizeof(AnomalyUiGlassFlagsV1),
+        alignof(AnomalyUiGlassFlagsV1),
+        {{"ANOMALY_UI_GLASS_V1_NONE", ANOMALY_UI_GLASS_V1_NONE},
+         {"ANOMALY_UI_GLASS_V1_NO_SHADOW", ANOMALY_UI_GLASS_V1_NO_SHADOW},
+         {"ANOMALY_UI_GLASS_V1_NO_RIM", ANOMALY_UI_GLASS_V1_NO_RIM}},
+        false);
+    AppendEnum(
+        output,
         "AnomalyWindowFlagsV1",
         sizeof(AnomalyWindowFlagsV1),
         alignof(AnomalyWindowFlagsV1),
@@ -708,7 +705,8 @@ std::string BuildSnapshot() {
          {"ANOMALY_GLYPH_RANGE_V1_LATIN", ANOMALY_GLYPH_RANGE_V1_LATIN},
          {"ANOMALY_GLYPH_RANGE_V1_CYRILLIC", ANOMALY_GLYPH_RANGE_V1_CYRILLIC},
          {"ANOMALY_GLYPH_RANGE_V1_JAPANESE", ANOMALY_GLYPH_RANGE_V1_JAPANESE},
-         {"ANOMALY_GLYPH_RANGE_V1_CHINESE_FULL", ANOMALY_GLYPH_RANGE_V1_CHINESE_FULL}},
+         {"ANOMALY_GLYPH_RANGE_V1_CHINESE_FULL", ANOMALY_GLYPH_RANGE_V1_CHINESE_FULL},
+         {"ANOMALY_GLYPH_RANGE_V1_PRIVATE_USE", ANOMALY_GLYPH_RANGE_V1_PRIVATE_USE}},
         false);
     AppendEnum(
         output,
@@ -911,7 +909,8 @@ std::string BuildSnapshot() {
          {"on_stop", offsetof(AnomalyPluginDescriptorV1, on_stop)},
          {"on_unload", offsetof(AnomalyPluginDescriptorV1, on_unload)},
          {"on_update", offsetof(AnomalyPluginDescriptorV1, on_update)},
-         {"on_draw", offsetof(AnomalyPluginDescriptorV1, on_draw)}},
+         {"on_draw", offsetof(AnomalyPluginDescriptorV1, on_draw)},
+         {"on_overlay", offsetof(AnomalyPluginDescriptorV1, on_overlay)}},
         false);
     AppendStruct(
         output,
@@ -1006,6 +1005,16 @@ std::string BuildSnapshot() {
          {"object_key_at", offsetof(AnomalyJsonServiceV1, object_key_at)},
          {"object_find", offsetof(AnomalyJsonServiceV1, object_find)},
          {"serialize", offsetof(AnomalyJsonServiceV1, serialize)}},
+        false);
+    AppendStruct(
+        output,
+        "AnomalyProfileServiceV1",
+        sizeof(AnomalyProfileServiceV1),
+        alignof(AnomalyProfileServiceV1),
+        {{"struct_size", offsetof(AnomalyProfileServiceV1, struct_size)},
+         {"service_version", offsetof(AnomalyProfileServiceV1, service_version)},
+         {"user", offsetof(AnomalyProfileServiceV1, user)},
+         {"load", offsetof(AnomalyProfileServiceV1, load)}},
         false);
     AppendStruct(
         output,
@@ -1242,6 +1251,18 @@ std::string BuildSnapshot() {
         false);
     AppendStruct(
         output,
+        "AnomalySignatureServiceV3",
+        sizeof(AnomalySignatureServiceV3),
+        alignof(AnomalySignatureServiceV3),
+        {{"struct_size", offsetof(AnomalySignatureServiceV3, struct_size)},
+         {"service_version", offsetof(AnomalySignatureServiceV3, service_version)},
+         {"user", offsetof(AnomalySignatureServiceV3, user)},
+         {"resolve", offsetof(AnomalySignatureServiceV3, resolve)},
+         {"resolve_layout", offsetof(AnomalySignatureServiceV3, resolve_layout)},
+         {"resolve_batch", offsetof(AnomalySignatureServiceV3, resolve_batch)}},
+        false);
+    AppendStruct(
+        output,
         "AnomalyHookServiceV1",
         sizeof(AnomalyHookServiceV1),
         alignof(AnomalyHookServiceV1),
@@ -1300,6 +1321,20 @@ std::string BuildSnapshot() {
         false);
     AppendStruct(
         output,
+        "AnomalyUiGlassStyleV1",
+        sizeof(AnomalyUiGlassStyleV1),
+        alignof(AnomalyUiGlassStyleV1),
+        {{"struct_size", offsetof(AnomalyUiGlassStyleV1, struct_size)},
+         {"flags", offsetof(AnomalyUiGlassStyleV1, flags)},
+         {"variant", offsetof(AnomalyUiGlassStyleV1, variant)},
+         {"tint_rgba", offsetof(AnomalyUiGlassStyleV1, tint_rgba)},
+         {"rounding", offsetof(AnomalyUiGlassStyleV1, rounding)},
+         {"scale", offsetof(AnomalyUiGlassStyleV1, scale)},
+         {"opacity", offsetof(AnomalyUiGlassStyleV1, opacity)},
+         {"refraction_scale", offsetof(AnomalyUiGlassStyleV1, refraction_scale)}},
+        false);
+    AppendStruct(
+        output,
         "AnomalyUiServiceV1",
         sizeof(AnomalyUiServiceV1),
         alignof(AnomalyUiServiceV1),
@@ -1350,7 +1385,17 @@ std::string BuildSnapshot() {
          {"text_wrapped", offsetof(AnomalyUiServiceV1, text_wrapped)},
          {"begin_child_auto_fit_y", offsetof(AnomalyUiServiceV1, begin_child_auto_fit_y)},
          {"slider_float_enabled", offsetof(AnomalyUiServiceV1, slider_float_enabled)},
-         {"set_next_item_width", offsetof(AnomalyUiServiceV1, set_next_item_width)}},
+         {"set_next_item_width", offsetof(AnomalyUiServiceV1, set_next_item_width)},
+         {"overlay_viewport_size", offsetof(AnomalyUiServiceV1, overlay_viewport_size)},
+         {"overlay_glass", offsetof(AnomalyUiServiceV1, overlay_glass)},
+         {"overlay_rect_filled", offsetof(AnomalyUiServiceV1, overlay_rect_filled)},
+         {"overlay_line", offsetof(AnomalyUiServiceV1, overlay_line)},
+         {"overlay_circle", offsetof(AnomalyUiServiceV1, overlay_circle)},
+         {"overlay_ring_sector", offsetof(AnomalyUiServiceV1, overlay_ring_sector)},
+         {"overlay_measure_text", offsetof(AnomalyUiServiceV1, overlay_measure_text)},
+         {"overlay_text", offsetof(AnomalyUiServiceV1, overlay_text)},
+         {"overlay_glass_ring_sector", offsetof(AnomalyUiServiceV1, overlay_glass_ring_sector)},
+         {"draw_screen_primitives", offsetof(AnomalyUiServiceV1, draw_screen_primitives)}},
         false);
     AppendStruct(
         output,
@@ -1503,7 +1548,8 @@ std::string BuildSnapshot() {
          {"request", offsetof(AnomalyTextureServiceV1, request)},
          {"release", offsetof(AnomalyTextureServiceV1, release)},
          {"state", offsetof(AnomalyTextureServiceV1, state)},
-         {"draw", offsetof(AnomalyTextureServiceV1, draw)}},
+         {"draw", offsetof(AnomalyTextureServiceV1, draw)},
+         {"draw_overlay", offsetof(AnomalyTextureServiceV1, draw_overlay)}},
         false);
     AppendStruct(
         output,
@@ -1604,6 +1650,34 @@ std::string BuildSnapshot() {
          {"resolve_utf8", offsetof(AnomalyUe5NamesServiceV1, resolve_utf8)},
          {"resolve_ftext_utf8", offsetof(AnomalyUe5NamesServiceV1, resolve_ftext_utf8)}},
         false);
+    AppendStruct(output, "AnomalyModEntryV1", sizeof(AnomalyModEntryV1), alignof(AnomalyModEntryV1),
+        {{"struct_size", offsetof(AnomalyModEntryV1, struct_size)},
+         {"enabled", offsetof(AnomalyModEntryV1, enabled)},
+         {"disabled_files", offsetof(AnomalyModEntryV1, disabled_files)},
+         {"index_complete", offsetof(AnomalyModEntryV1, index_complete)},
+         {"key", offsetof(AnomalyModEntryV1, key)},
+         {"name", offsetof(AnomalyModEntryV1, name)},
+         {"vehicles", offsetof(AnomalyModEntryV1, vehicles)},
+         {"analysis_error", offsetof(AnomalyModEntryV1, analysis_error)},
+         {"resource_groups", offsetof(AnomalyModEntryV1, resource_groups)}}, false);
+    AppendStruct(output, "AnomalyModsServiceV1", sizeof(AnomalyModsServiceV1), alignof(AnomalyModsServiceV1),
+        {{"struct_size", offsetof(AnomalyModsServiceV1, struct_size)},
+         {"service_version", offsetof(AnomalyModsServiceV1, service_version)},
+         {"user", offsetof(AnomalyModsServiceV1, user)},
+         {"compatibility_mode", offsetof(AnomalyModsServiceV1, compatibility_mode)},
+         {"enumerate", offsetof(AnomalyModsServiceV1, enumerate)},
+         {"set_enabled", offsetof(AnomalyModsServiceV1, set_enabled)},
+         {"assets", offsetof(AnomalyModsServiceV1, assets)},
+         {"synchronize", offsetof(AnomalyModsServiceV1, synchronize)}}, false);
+    AppendStruct(output, "AnomalyUe5AssetsServiceV1", sizeof(AnomalyUe5AssetsServiceV1),
+        alignof(AnomalyUe5AssetsServiceV1),
+        {{"struct_size", offsetof(AnomalyUe5AssetsServiceV1, struct_size)},
+         {"service_version", offsetof(AnomalyUe5AssetsServiceV1, service_version)},
+         {"user", offsetof(AnomalyUe5AssetsServiceV1, user)},
+         {"prepare_class", offsetof(AnomalyUe5AssetsServiceV1, prepare_class)},
+         {"enumerate_derived", offsetof(AnomalyUe5AssetsServiceV1, enumerate_derived)},
+         {"prepare_string_table", offsetof(AnomalyUe5AssetsServiceV1, prepare_string_table)},
+         {"enumerate_string_table", offsetof(AnomalyUe5AssetsServiceV1, enumerate_string_table)}}, false);
     AppendStruct(
         output,
         "AnomalyUe5ObjectSnapshotV1",
@@ -1879,90 +1953,6 @@ std::string BuildSnapshot() {
           offsetof(AnomalyNteNavigationServiceV1, move_to_location)},
          {"stop_movement",
           offsetof(AnomalyNteNavigationServiceV1, stop_movement)}},
-        false);
-    AppendStruct(
-        output,
-        "AnomalyNteVehicleSnapshotV1",
-        sizeof(AnomalyNteVehicleSnapshotV1),
-        alignof(AnomalyNteVehicleSnapshotV1),
-        {{"struct_size", offsetof(AnomalyNteVehicleSnapshotV1, struct_size)},
-         {"flags", offsetof(AnomalyNteVehicleSnapshotV1, flags)},
-         {"vehicle", offsetof(AnomalyNteVehicleSnapshotV1, vehicle)},
-         {"speed_kmh", offsetof(AnomalyNteVehicleSnapshotV1, speed_kmh)},
-         {"top_speed_ratio", offsetof(AnomalyNteVehicleSnapshotV1, top_speed_ratio)},
-         {"wheel_friction_enabled", offsetof(AnomalyNteVehicleSnapshotV1, wheel_friction_enabled)},
-         {"engine_torque_ratio", offsetof(AnomalyNteVehicleSnapshotV1, engine_torque_ratio)},
-         {"vehicle_entity_id", offsetof(AnomalyNteVehicleSnapshotV1, vehicle_entity_id)},
-         {"vehicle_class_name", offsetof(AnomalyNteVehicleSnapshotV1, vehicle_class_name)}},
-        false);
-    AppendStruct(
-        output,
-        "AnomalyNteVehicleCatalogSnapshotV1",
-        sizeof(AnomalyNteVehicleCatalogSnapshotV1),
-        alignof(AnomalyNteVehicleCatalogSnapshotV1),
-        {{"struct_size", offsetof(AnomalyNteVehicleCatalogSnapshotV1, struct_size)},
-         {"flags", offsetof(AnomalyNteVehicleCatalogSnapshotV1, flags)},
-         {"sequence", offsetof(AnomalyNteVehicleCatalogSnapshotV1, sequence)},
-         {"entry_count", offsetof(AnomalyNteVehicleCatalogSnapshotV1, entry_count)},
-         {"reserved", offsetof(AnomalyNteVehicleCatalogSnapshotV1, reserved)}},
-        false);
-    AppendStruct(
-        output,
-        "AnomalyNteVehicleSummonRequestV1",
-        sizeof(AnomalyNteVehicleSummonRequestV1),
-        alignof(AnomalyNteVehicleSummonRequestV1),
-        {{"struct_size", offsetof(AnomalyNteVehicleSummonRequestV1, struct_size)},
-         {"flags", offsetof(AnomalyNteVehicleSummonRequestV1, flags)},
-         {"world_position", offsetof(AnomalyNteVehicleSummonRequestV1, world_position)}},
-        false);
-    AppendStruct(
-        output,
-        "AnomalyNteVehicleSpeedTargetV1",
-        sizeof(AnomalyNteVehicleSpeedTargetV1),
-        alignof(AnomalyNteVehicleSpeedTargetV1),
-        {{"struct_size", offsetof(AnomalyNteVehicleSpeedTargetV1, struct_size)},
-         {"scope", offsetof(AnomalyNteVehicleSpeedTargetV1, scope)},
-         {"top_speed_kmh", offsetof(AnomalyNteVehicleSpeedTargetV1, top_speed_kmh)},
-         {"minimum_speed_kmh", offsetof(AnomalyNteVehicleSpeedTargetV1, minimum_speed_kmh)}},
-        false);
-    AppendStruct(
-        output,
-        "AnomalyNteVehicleServiceV1",
-        sizeof(AnomalyNteVehicleServiceV1),
-        alignof(AnomalyNteVehicleServiceV1),
-        {{"struct_size", offsetof(AnomalyNteVehicleServiceV1, struct_size)},
-         {"service_version", offsetof(AnomalyNteVehicleServiceV1, service_version)},
-         {"user", offsetof(AnomalyNteVehicleServiceV1, user)},
-         {"snapshot", offsetof(AnomalyNteVehicleServiceV1, snapshot)},
-         {"set_top_speed_ratio", offsetof(AnomalyNteVehicleServiceV1, set_top_speed_ratio)},
-         {"set_wheel_friction_enabled", offsetof(AnomalyNteVehicleServiceV1, set_wheel_friction_enabled)},
-         {"reset", offsetof(AnomalyNteVehicleServiceV1, reset)},
-         {"catalog_snapshot", offsetof(AnomalyNteVehicleServiceV1, catalog_snapshot)},
-         {"vehicle_id_at", offsetof(AnomalyNteVehicleServiceV1, vehicle_id_at)},
-         {"set_summon_vehicle_id", offsetof(AnomalyNteVehicleServiceV1, set_summon_vehicle_id)},
-         {"summon_vehicle", offsetof(AnomalyNteVehicleServiceV1, summon_vehicle)},
-         {"set_engine_torque_ratio", offsetof(AnomalyNteVehicleServiceV1, set_engine_torque_ratio)},
-         {"refresh_catalog", offsetof(AnomalyNteVehicleServiceV1, refresh_catalog)},
-         {"catalog_label_at", offsetof(AnomalyNteVehicleServiceV1, catalog_label_at)},
-         {"set_other_vehicles_top_speed_ratio",
-          offsetof(AnomalyNteVehicleServiceV1, set_other_vehicles_top_speed_ratio)},
-         {"set_other_vehicles_engine_torque_ratio",
-          offsetof(AnomalyNteVehicleServiceV1, set_other_vehicles_engine_torque_ratio)},
-         {"set_other_vehicles_min_speed_ratio",
-          offsetof(AnomalyNteVehicleServiceV1, set_other_vehicles_min_speed_ratio)},
-         {"authorize_fine_speed_tuning",
-          offsetof(AnomalyNteVehicleServiceV1, authorize_fine_speed_tuning)},
-         {"set_fine_speed_tuning_enabled",
-          offsetof(AnomalyNteVehicleServiceV1, set_fine_speed_tuning_enabled)},
-         {"revoke_fine_speed_authorization",
-          offsetof(AnomalyNteVehicleServiceV1, revoke_fine_speed_authorization)},
-         {"customization_catalog_snapshot",
-          offsetof(AnomalyNteVehicleServiceV1, customization_catalog_snapshot)},
-         {"customization_option_at",
-          offsetof(AnomalyNteVehicleServiceV1, customization_option_at)},
-         {"repair_current_vehicle",
-          offsetof(AnomalyNteVehicleServiceV1, repair_current_vehicle)},
-         {"set_speed_target", offsetof(AnomalyNteVehicleServiceV1, set_speed_target)}},
         false);
     AppendStruct(
         output,
@@ -2511,6 +2501,8 @@ std::string BuildSnapshot() {
         ANOMALY_STORAGE_SERVICE_V1_VERSION, "AnomalyStorageServiceV1", false);
     AppendService(output, ANOMALY_JSON_SERVICE_V1_ID,
         ANOMALY_JSON_SERVICE_V1_VERSION, "AnomalyJsonServiceV1", false);
+    AppendService(output, ANOMALY_PROFILE_SERVICE_V1_ID,
+        ANOMALY_PROFILE_SERVICE_V1_VERSION, "AnomalyProfileServiceV1", false);
     AppendService(output, ANOMALY_RUNTIME_INFO_SERVICE_V1_ID,
         ANOMALY_RUNTIME_INFO_SERVICE_V1_VERSION, "AnomalyRuntimeInfoServiceV1", false);
     AppendService(output, ANOMALY_DIAGNOSTICS_SERVICE_V1_ID,
@@ -2529,6 +2521,8 @@ std::string BuildSnapshot() {
         ANOMALY_SIGNATURE_SERVICE_V1_VERSION, "AnomalySignatureServiceV1", false);
     AppendService(output, ANOMALY_SIGNATURE_SERVICE_V2_ID,
         ANOMALY_SIGNATURE_SERVICE_V2_VERSION, "AnomalySignatureServiceV2", false);
+    AppendService(output, ANOMALY_SIGNATURE_SERVICE_V3_ID,
+        ANOMALY_SIGNATURE_SERVICE_V3_VERSION, "AnomalySignatureServiceV3", false);
     AppendService(output, ANOMALY_HOOK_SERVICE_V1_ID,
         ANOMALY_HOOK_SERVICE_V1_VERSION, "AnomalyHookServiceV1", false);
     AppendService(output, ANOMALY_PATCH_SERVICE_V1_ID,
@@ -2554,6 +2548,9 @@ std::string BuildSnapshot() {
         ANOMALY_UE5_FRAMEWORK_SERVICE_V1_VERSION, "AnomalyUe5FrameworkServiceV1", false);
     AppendService(output, ANOMALY_UE5_PROCESS_EVENT_SERVICE_V1_ID,
         ANOMALY_UE5_PROCESS_EVENT_SERVICE_V1_VERSION, "AnomalyUe5ProcessEventServiceV1", false);
+    AppendService(output, ANOMALY_MODS_SERVICE_V1_ID, ANOMALY_MODS_SERVICE_V1_VERSION, "AnomalyModsServiceV1", false);
+    AppendService(output, ANOMALY_UE5_ASSETS_SERVICE_V1_ID,
+        ANOMALY_UE5_ASSETS_SERVICE_V1_VERSION, "AnomalyUe5AssetsServiceV1", false);
     AppendService(output, ANOMALY_UE5_NAMES_SERVICE_V1_ID,
         ANOMALY_UE5_NAMES_SERVICE_V1_VERSION, "AnomalyUe5NamesServiceV1", false);
     AppendService(
@@ -2578,8 +2575,6 @@ std::string BuildSnapshot() {
         ANOMALY_NTE_MAP_LANDMARKS_SERVICE_V1_VERSION, "AnomalyNteMapLandmarksServiceV1", false);
     AppendService(output, ANOMALY_NTE_NAVIGATION_SERVICE_V1_ID,
         ANOMALY_NTE_NAVIGATION_SERVICE_V1_VERSION, "AnomalyNteNavigationServiceV1", false);
-    AppendService(output, ANOMALY_NTE_VEHICLE_SERVICE_V1_ID,
-        ANOMALY_NTE_VEHICLE_SERVICE_V1_VERSION, "AnomalyNteVehicleServiceV1", false);
     AppendService(output, ANOMALY_NTE_PICKUP_SERVICE_V1_ID,
         ANOMALY_NTE_PICKUP_SERVICE_V1_VERSION, "AnomalyNtePickupServiceV1", false);
     AppendService(output, ANOMALY_NTE_UI_BUTTONS_SERVICE_V1_ID,

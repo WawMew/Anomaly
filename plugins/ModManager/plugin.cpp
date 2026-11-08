@@ -1,0 +1,344 @@
+#include "world_reload.hpp"
+#include "visual_reload.hpp"
+#include <anomaly/sdk/localization.hpp>
+#include <mutex>
+#include <optional>
+#include <set>
+
+namespace {
+using namespace anomaly::sdk;
+using Reload = mod_manager::WorldReload;
+using Visual = mod_manager::VisualReload;
+
+struct Row {
+    std::string key, name, groups;
+    bool enabled{}, disabled{}, complete{};
+    bool operator==(const Row&) const = default;
+};
+struct RowCollection { std::vector<Row> values; bool failed{}; };
+struct AssetCollection { std::set<std::string> values; bool failed{}; };
+enum class Kind { Toggle, ReloadWorld };
+struct Action { Kind kind; std::string key; bool enabled{}; };
+struct Prepared { bool reload_world{}; std::vector<std::string> packages; };
+
+struct Context {
+    Localizer localizer;
+    const AnomalyHostApiV1* api{};
+    const AnomalyModsServiceV1* mods{};
+    const AnomalySchedulerServiceV1* scheduler{};
+    const AnomalyWindowServiceV1* windows{};
+    AnomalyGenerationHandleV1 task{}, window{};
+    std::mutex mutex;
+    bool stopping{true}, busy{}, compatibility{}, profile_valid{}, services_ready{}, visual_ready{}, catalog_seen{};
+    const AnomalyNteSessionServiceV1* session{};
+    std::set<std::string> pending_visual;
+    std::map<std::string, std::set<std::string>> visual_index;
+    std::vector<Row> rows;
+    std::optional<Action> action;
+    std::optional<Prepared> prepared;
+    std::string status;
+    size_t page{};
+    mod_manager::NativeAccess native;
+    Reload reload;
+    Visual visual;
+} g;
+
+std::string Copy(AnomalyStringViewV1 value) { return value.data ? std::string(value.data, value.size) : std::string{}; }
+std::string ErrorText(AnomalyStatusV1 value) { return value.message.size ? Copy(value.message) : std::to_string(value.code); }
+void LocalizedStatus(std::string_view key, std::string_view fallback, std::string_view detail = {}) {
+    const std::array<std::string_view, 1> args{detail};
+    auto text = detail.empty() ? g.localizer.Text(key, fallback) : g.localizer.Format(key, fallback, args);
+    std::scoped_lock lock(g.mutex); g.status = std::move(text);
+}
+int ANOMALY_CALL Collect(void* user, const AnomalyModEntryV1* entry) noexcept {
+    auto& result = *static_cast<RowCollection*>(user);
+    try {
+        if (!entry || entry->struct_size < offsetof(AnomalyModEntryV1, resource_groups)) {
+            result.failed = true; return 0;
+        }
+        result.values.push_back({Copy(entry->key), Copy(entry->name),
+            Copy(entry->struct_size >= offsetof(AnomalyModEntryV1, resource_groups) + sizeof(entry->resource_groups)
+                ? entry->resource_groups : entry->vehicles),
+            entry->enabled != 0, entry->disabled_files != 0, entry->index_complete != 0});
+        return 1;
+    } catch (...) { result.failed = true; return 0; }
+}
+int ANOMALY_CALL CollectAsset(void* user, AnomalyStringViewV1 path) noexcept {
+    auto& result = *static_cast<AssetCollection*>(user);
+    try { result.values.insert(Copy(path)); return 1; }
+    catch (...) { result.failed = true; return 0; }
+}
+
+void ANOMALY_CALL Worker(void*, AnomalyGenerationHandleV1) noexcept {
+    try {
+        g.visual.ReportStall();
+        std::optional<Action> action;
+        bool services_ready{}, binding_pending{}, busy{}, visual_ready{}, compatibility{};
+        std::vector<Row> previous;
+        {
+            std::scoped_lock lock(g.mutex);
+            if (g.stopping) return;
+            action = std::exchange(g.action, {});
+            services_ready = g.services_ready; binding_pending = g.session != nullptr;
+            busy = g.busy; visual_ready = g.visual_ready; compatibility = g.compatibility;
+            previous = g.rows;
+        }
+        if (g.native.ReflectionAvailable() && !services_ready && !binding_pending) {
+            const Host host(g.api);
+            const auto session = host.Query<AnomalyNteSessionServiceV1>(ANOMALY_NTE_SESSION_SERVICE_V1_ID).get();
+            if (session && g.native.BindServices(g.api)) {
+                std::scoped_lock lock(g.mutex);
+                g.session = session;
+            }
+        }
+
+        bool ok = true, synchronized = false;
+        if (action && action->kind == Kind::Toggle) {
+            const auto saved = compatibility ? AnomalyStatusV1{ANOMALY_STATUS_V1_CONFLICT}
+                : g.mods->set_enabled(g.mods->user, StringView(action->key), action->enabled);
+            ok = saved.code == 0;
+            if (ok) {
+                const auto mounted = g.mods->synchronize(g.mods->user);
+                synchronized = mounted.code == 0; ok = synchronized;
+                if (ok) LocalizedStatus("status.saved", "Applied");
+                else LocalizedStatus("status.mount_pending", "Container switch failed: {0}", ErrorText(mounted));
+            } else LocalizedStatus("status.save_failed", "Save failed: {0}", ErrorText(saved));
+        }
+
+        RowCollection collection;
+        auto listing = g.mods->enumerate(g.mods->user, Collect, &collection);
+        if (collection.failed && !listing.code) listing = {ANOMALY_STATUS_V1_FAILED};
+        const bool listed = listing.code == 0;
+        auto rows = std::move(collection.values);
+        if (!listed) { rows.clear(); LocalizedStatus("status.catalog_failed", "Read failed: {0}", ErrorText(listing)); }
+        std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return std::tie(a.groups, a.name) < std::tie(b.groups, b.name); });
+
+        if (listed && !compatibility) {
+            bool index_failed{};
+            for (const auto& row : rows) {
+                const auto old = std::find_if(previous.begin(), previous.end(), [&](const Row& value) { return value.key == row.key; });
+                const bool changed = g.catalog_seen && (old == previous.end() ? row.enabled : old->enabled != row.enabled);
+                if (!changed && g.visual_index.contains(row.key)) continue;
+                if (changed) if (const auto cached = g.visual_index.find(row.key); cached != g.visual_index.end())
+                    g.pending_visual.insert(cached->second.begin(), cached->second.end());
+                AssetCollection assets;
+                if (!row.complete || g.mods->assets(g.mods->user, StringView(row.key), CollectAsset, &assets).code || assets.failed) {
+                    if (changed) index_failed = true;
+                    continue;
+                }
+                if (changed) g.pending_visual.insert(assets.values.begin(), assets.values.end());
+                g.visual_index[row.key] = std::move(assets.values);
+            }
+            if (g.catalog_seen) for (const auto& old : previous)
+                if (std::none_of(rows.begin(), rows.end(), [&](const Row& row) { return row.key == old.key; })) {
+                    if (old.enabled) if (const auto cached = g.visual_index.find(old.key); cached != g.visual_index.end())
+                        g.pending_visual.insert(cached->second.begin(), cached->second.end());
+                    g.visual_index.erase(old.key);
+                }
+            g.catalog_seen = true;
+            if (index_failed) {
+                g.pending_visual.clear();
+                LocalizedStatus("status.visual_unavailable", "Local refresh unavailable; reload world");
+            }
+        }
+        if (!ok) g.pending_visual.clear();
+
+        std::optional<Prepared> prepared;
+        const bool reload = action && action->kind == Kind::ReloadWorld;
+        if (reload) {
+            if (!compatibility && services_ready) {
+                const auto mounted = g.mods->synchronize(g.mods->user);
+                if (!mounted.code) {
+                    prepared = Prepared{true, {}};
+                    g.pending_visual.clear();
+                } else LocalizedStatus("status.mount_pending", "Container switch failed: {0}", ErrorText(mounted));
+            } else LocalizedStatus("status.reload_unavailable", "World reload unavailable");
+        }
+
+        bool auto_visual = !reload && !g.pending_visual.empty() && ok && (!busy || (action && action->kind == Kind::Toggle));
+        if (auto_visual && !action) {
+            std::scoped_lock lock(g.mutex);
+            if (g.busy) auto_visual = false; else g.busy = true;
+        }
+        if (auto_visual) {
+            const auto mounted = synchronized ? Ok() : g.mods->synchronize(g.mods->user);
+            if (!mounted.code && visual_ready) {
+                Prepared value;
+                value.packages.assign(g.pending_visual.begin(), g.pending_visual.end());
+                prepared = std::move(value);
+            } else if (mounted.code) LocalizedStatus("status.mount_pending", "Container switch failed: {0}", ErrorText(mounted));
+            else LocalizedStatus("status.visual_unavailable", "Local refresh unavailable; reload world");
+            g.pending_visual.clear();
+        }
+        {
+            std::scoped_lock lock(g.mutex);
+            if (g.stopping) return;
+            if (listed && g.rows != rows) g.rows.swap(rows);
+            if (prepared) { g.prepared = std::move(prepared); g.busy = true; }
+            else if (action || auto_visual) g.busy = false;
+            if (g.scheduler->schedule(g.scheduler->user, 1000, Worker, nullptr, &g.task).code)
+                g.status = g.localizer.Text("status.worker_failed", "Refresh stopped; reload plugin.");
+        }
+    } catch (...) {
+        std::scoped_lock lock(g.mutex); g.busy = false;
+        g.status = g.localizer.Text("status.worker_failed", "Refresh stopped; reload plugin.");
+    }
+}
+void Request(Action action) {
+    std::scoped_lock lock(g.mutex);
+    if (g.stopping || g.busy || g.compatibility) return;
+    g.action = std::move(action); g.busy = true;
+    g.status = g.localizer.Text("status.queued", "Queued");
+}
+void ReportReload(Reload::Result result) {
+    switch (result) {
+    case Reload::Result::Waiting: LocalizedStatus("status.reload_wait", "Reloading world..."); break;
+    case Reload::Result::Reloaded: LocalizedStatus("status.reloaded", "World reloaded"); break;
+    case Reload::Result::DifferentWorld: LocalizedStatus("status.reload_changed", "Entered another scene; reload not confirmed"); break;
+    case Reload::Result::Timeout: LocalizedStatus("status.reload_timeout", "World reload not confirmed"); break;
+    case Reload::Result::Retained: LocalizedStatus("status.reload_retained", "World reloaded; old game data is still resident"); break;
+    default: LocalizedStatus("status.reload_unavailable", "World reload unavailable"); break;
+    }
+}
+void ANOMALY_CALL Update(void*, double) noexcept {
+    try {
+        std::optional<Prepared> prepared;
+        {
+            std::unique_lock lock(g.mutex, std::try_to_lock);
+            if (!lock || g.stopping) return;
+            if (g.session) {
+                g.reload.Bind(&g.native, g.session);
+                g.visual_ready = g.visual.Bind(&g.native);
+                g.session = nullptr; g.services_ready = true;
+            }
+            if (!g.reload.Busy()) prepared = std::exchange(g.prepared, {});
+        }
+        const auto now = Reload::Clock::now();
+        if (prepared && !prepared->reload_world) {
+            const auto result = g.visual.Run(prepared->packages);
+            switch (result) {
+            case Visual::Result::Updated: LocalizedStatus("status.visual_updated", "Appearance refreshed"); break;
+            case Visual::Result::Partial: LocalizedStatus("status.visual_partial", "Appearance refreshed; world reload needed for: {0}", g.visual.Detail()); break;
+            case Visual::Result::NotResident: LocalizedStatus("status.saved", "Applied"); break;
+            case Visual::Result::Unsupported: LocalizedStatus("status.visual_unsupported", "Use world reload for: {0}", g.visual.Detail()); break;
+            case Visual::Result::Unavailable: LocalizedStatus("status.visual_unavailable", "Local refresh unavailable; reload world"); break;
+            default: LocalizedStatus("status.visual_failed", "Local refresh failed: {0}", g.visual.Detail()); break;
+            }
+            std::scoped_lock lock(g.mutex); g.visual_ready = g.visual.Available(); g.busy = g.prepared.has_value() || g.action.has_value();
+            return;
+        }
+        if ((prepared && prepared->reload_world) || g.reload.Busy()) {
+            const auto before = g.reload.State();
+            const auto result = prepared ? g.reload.Begin(now) : g.reload.Poll(now);
+            if (prepared || before != result) ReportReload(result);
+            if (!g.reload.Busy()) { std::scoped_lock lock(g.mutex); g.busy = g.prepared.has_value() || g.action.has_value(); }
+        }
+    } catch (...) {
+        g.reload.Cancel(); LocalizedStatus("status.unavailable", "Game service unavailable.");
+        std::scoped_lock lock(g.mutex); g.busy = false;
+    }
+}
+void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) noexcept {
+    if (!ui || !g.windows || !g.window.id) return;
+    try {
+        AnomalyWindowStateV1 state{sizeof(state)};
+        if (g.windows->state(g.windows->user, g.window, &state).code || !state.open) return;
+        int visible{}; if (g.windows->begin(g.windows->user, g.window, 0, &visible).code) return;
+        struct End { ~End() { g.windows->end(g.windows->user, g.window); } } end;
+        if (!visible) return;
+        std::vector<Row> rows;
+        std::string status;
+        bool busy{}, services_ready{};
+        {
+            std::unique_lock lock(g.mutex, std::try_to_lock);
+            if (!lock) return;
+            rows = g.rows; status = g.status; busy = g.busy; services_ready = g.services_ready;
+        }
+        const auto TextLocalized = [&](std::string_view key, std::string_view fallback) {
+            ui->text(ui->user, StringView(g.localizer.Text(key, fallback)));
+        };
+        if (g.compatibility) TextLocalized("mode.compatibility", "Compatibility mode");
+        else TextLocalized("mode.hot", "Hot mode");
+        if (!g.compatibility && !g.profile_valid)
+            TextLocalized("status.profile_unavailable", "Profile mismatch; refresh unavailable");
+        else if (!g.compatibility && !services_ready)
+            TextLocalized("status.services_pending", "Waiting for game services.");
+        if (!status.empty()) ui->text(ui->user, StringView(status));
+        if (ui->button_enabled(ui->user, StringView(g.localizer.Text("action.reload_world", "Reload world")), 0, 0, !busy && !g.compatibility && services_ready))
+            Request({Kind::ReloadWorld, {}});
+        constexpr size_t page_size = 10;
+        const size_t pages = std::max(size_t{1}, (rows.size() + page_size - 1) / page_size);
+        g.page = std::min(g.page, pages - 1);
+        if (ui->button_enabled(ui->user, StringView(g.localizer.Text("action.previous_page", "Previous")), 0, 0, g.page > 0)) --g.page;
+        ui->same_line(ui->user, 0, -1);
+        const auto number = std::to_string(g.page + 1), count = std::to_string(pages);
+        ui->text(ui->user, StringView(g.localizer.Format("page.position", "{0} / {1}", std::array<std::string_view, 2>{number, count})));
+        ui->same_line(ui->user, 0, -1);
+        if (ui->button_enabled(ui->user, StringView(g.localizer.Text("action.next_page", "Next")), 0, 0, g.page + 1 < pages)) ++g.page;
+        std::optional<std::string> group;
+        for (size_t i = g.page * page_size; i < std::min(rows.size(), (g.page + 1) * page_size); ++i) {
+            const auto& row = rows[i];
+            if (!group || row.groups != *group) {
+                ui->separator(ui->user); group = row.groups;
+                if (group->empty()) TextLocalized("group.unknown", "Unclassified resources");
+                else ui->text(ui->user, StringView(*group));
+            }
+            int enabled = row.enabled;
+            if (ui->checkbox(ui->user, StringView("##enabled-" + row.key), &enabled) && !busy && !g.compatibility && (row.enabled || !row.disabled))
+                Request({Kind::Toggle, row.key, enabled != 0});
+            ui->same_line(ui->user, 0, -1); ui->text(ui->user, StringView(row.name));
+            if (!row.complete) TextLocalized("row.incomplete", "Index unavailable.");
+            if (row.disabled) TextLocalized("row.disabled_files", "Files disabled; restore in Launcher.");
+        }
+    } catch (...) {}
+}
+AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* api, void** context) noexcept {
+    try {
+        const Host host(api);
+        g.api = api; g.localizer = Localizer(api);
+        g.mods = host.Query<AnomalyModsServiceV1>(ANOMALY_MODS_SERVICE_V1_ID).get();
+        g.scheduler = host.Query<AnomalySchedulerServiceV1>(ANOMALY_SCHEDULER_SERVICE_V1_ID).get();
+        g.windows = host.Query<AnomalyWindowServiceV1>(ANOMALY_WINDOW_SERVICE_V1_ID).get();
+        if (!context || !g.mods || g.mods->struct_size < sizeof(*g.mods) || !g.mods->synchronize ||
+            !g.mods->assets || !g.mods->enumerate || !g.mods->set_enabled || !g.mods->compatibility_mode ||
+            !g.scheduler || g.scheduler->struct_size < sizeof(*g.scheduler) ||
+            !g.scheduler->schedule || !g.scheduler->cancel || !g.windows ||
+            g.windows->struct_size < sizeof(*g.windows) || !g.windows->register_window ||
+            !g.windows->release_window || !g.windows->state || !g.windows->begin || !g.windows->end)
+            return {ANOMALY_STATUS_V1_UNAVAILABLE};
+        g.compatibility = g.mods->compatibility_mode(g.mods->user) != 0;
+        try { g.profile_valid = !g.compatibility && g.native.Load(api); } catch (...) { g.profile_valid = false; }
+        AnomalyWindowSpecV1 spec{sizeof(spec)};
+        const auto title = g.localizer.Text("window.title", "Mod Manager");
+        spec.id = StringView("mod-manager"); spec.title = StringView(title);
+        spec.initial_width = 900; spec.initial_height = 650;
+        spec.minimum_width = 650; spec.minimum_height = 400;
+        const auto status = g.windows->register_window(g.windows->user, &spec, &g.window);
+        if (status.code) return status;
+        *context = &g; return Ok();
+    } catch (...) { return {ANOMALY_STATUS_V1_FAILED}; }
+}
+AnomalyStatusV1 ANOMALY_CALL Start(void*) noexcept {
+    try { if (!g.compatibility && g.native.ReflectionAvailable()) g.reload.Install(g.api, &g.native); } catch (...) {}
+    std::scoped_lock lock(g.mutex);
+    g.stopping = false;
+    return g.scheduler->schedule(g.scheduler->user, 0, Worker, nullptr, &g.task);
+}
+AnomalyStatusV1 ANOMALY_CALL Stop(void*, uint32_t) noexcept {
+    AnomalyGenerationHandleV1 task{};
+    { std::scoped_lock lock(g.mutex); g.stopping = true; task = g.task; }
+    if (task.id) g.scheduler->cancel(g.scheduler->user, task);
+    return g.reload.Stop();
+}
+void ANOMALY_CALL Unload(void*) noexcept {
+    if (g.window.id) g.windows->release_window(g.windows->user, g.window);
+    g.window = {}; g.reload.Cancel();
+}
+}
+ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(AnomalyPluginDescriptorV1* descriptor) {
+    if (!descriptor || descriptor->struct_size < sizeof(*descriptor)) return {ANOMALY_STATUS_V1_INVALID_ARGUMENT};
+    *descriptor = {sizeof(*descriptor), ANOMALY_PLUGIN_API_V1_MAJOR, ANOMALY_PLUGIN_API_V1_MINOR,
+        StringView("anomaly.mod-manager"), StringView("Mod Manager"), StringView("Anomaly"), StringView("0.1.0"),
+        Load, Start, Stop, Unload, Update, Draw};
+    return Ok();
+}

@@ -62,10 +62,13 @@ struct SignatureLayoutResolution {
 };
 
 // Learns instruction structure from successful resolutions. Relative branches
-// and RIP addresses can move; member and stack displacements stay fixed so
+// and RIP addresses can move; declared fixed member/stack displacements stay fixed so
 // existing consumers can keep using their original field offsets.
 // Recovery requires an exact, unique match of the remaining instruction bytes;
-// the caller must still run its address/ABI/semantic validators before Learn.
+// shared wrappers may additionally require learned direct branch-target evidence.
+// Compact windows retain declared operands and their intentional wildcards;
+// full windows disambiguate new clones. The caller must still run its
+// address/ABI/semantic validators before Learn.
 // Call from Worker/Lifecycle only: these operations scan memory and persist state.
 class SignatureUpdater final {
 public:
@@ -80,7 +83,7 @@ public:
     [[nodiscard]] std::string Learn(
         const SignatureScanContext& context, std::string_view contract,
         std::string_view original_pattern, std::uintptr_t instruction,
-        std::stop_token stop = {});
+        std::stop_token stop = {}, bool original_unique = false);
 
     // Opt-in member learning. Resolves the entire declaration before publishing
     // any field; unlike the address-only API, declared member operands may move.

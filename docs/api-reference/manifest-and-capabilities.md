@@ -11,7 +11,7 @@
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `schemaVersion` | ✅ | 常量 `2` |
-| `id` | ✅ | 规范化 ID：点分小写标签（如 `anomaly.example.my-plugin`），3–255 字符 |
+| `id` | ✅ | 插件 ID：`<作者>.<插件名>`，固定两段小写 kebab 标签（如 `b1ank.status-bar`、`anomaly.nte-teleport`），3–128 字符；第一段是作者命名空间，来源段 `local` / `builtin` / `plugin`、反域名前缀与任何第三段都被拒绝 |
 | `name` | ✅ | 显示名，1–128 字符 |
 | `description` | 否 | 插件简介，1–512 字符；宿主在插件详情的“关于”区域显示 |
 | `version` | ✅ | SemVer 字符串 |
@@ -31,7 +31,7 @@
 
 ```jsonc
 // dependencies[] 元素
-{ "id": "<qualifiedId>", "version": "<range>", "optional": false }
+{ "id": "<pluginId>", "version": "<range>", "optional": false }
 // services[] 元素
 { "id": "<qualifiedId>", "minVersion": 1, "optional": false }
 ```
@@ -41,7 +41,7 @@
 ```json
 {
   "schemaVersion": 2,
-  "id": "anomaly.example.my-plugin",
+  "id": "example.my-plugin",
   "name": "My Plugin",
   "description": "Shows current player and session diagnostics.",
   "author": "Me",
@@ -93,6 +93,7 @@ capability 约束**服务可见性与资源归属**（不是 native 代码沙箱
 | `anomaly.config` | `configuration` |
 | `anomaly.storage` | `storage` |
 | `anomaly.json` | `json` |
+| `anomaly.profile` | `json` |
 | `anomaly.runtime-info` | `runtime-info` |
 | `anomaly.diagnostics` | `diagnostics` |
 | `anomaly.scheduler` | `scheduler` |
@@ -117,6 +118,7 @@ capability 约束**服务可见性与资源归属**（不是 native 代码沙箱
 | `anomaly.ue5.objects` | `ue5-objects` |
 | `anomaly.ue5.world` | `ue5-world` |
 | `anomaly.ue5.streaming-source` | `ue5-streaming-source` |
+| `anomaly.ue5.assets` | `ue5-assets` |
 | `anomaly.nte.build` | `nte-build` |
 | `anomaly.nte.esc-menu-button` | `nte-esc-menu-button` |
 | `anomaly.nte.session` | `nte-session-snapshot` |
@@ -140,9 +142,10 @@ capability 约束**服务可见性与资源归属**（不是 native 代码沙箱
 | --- | --- |
 | `memory-read` | `anomaly.core` 的 `read_memory` |
 | `memory-write` | `anomaly.core` 的 `write_memory` |
+| `ui-overlay` | 插件窗口被关闭或在插件列表里隐藏后仍然每帧调用 `on_draw`，只用于绘制 `overlay_*` 叠加层（HUD、状态条）；此时 `begin_window` 返回 0、不打开任何窗口 |
 | `entity-esp` | ABI v1 兼容的 `anomaly.ui` ESP 绘制调用（`draw_entity_bbox` / `draw_entity_box3d` / `draw_entity_label`）；新插件应声明 `ue5-ahud` 并订阅 `anomaly.ue5.ahud` |
 
-以上三个 capability 是已知 capability，但不通过 service 映射自动派生——插件按需在 `capabilities` 中显式声明。
+以上四个 capability 是已知 capability，但不通过 service 映射自动派生——插件按需在 `capabilities` 中显式声明。
 
 ## 状态码
 
@@ -150,3 +153,5 @@ capability 约束**服务可见性与资源归属**（不是 native 代码沙箱
 
 - `ANOMALY_STATUS_V1_PERMISSION_DENIED` — 未声明所需 capability / grant。
 - `ANOMALY_STATUS_V1_UNAVAILABLE` — 服务 / Feature 尚未发布或已降级。
+
+`anomaly.mods` v1 需要 `mods` capability；线程与开关语义见[生命周期与 Core 服务](lifecycle-and-core.md)。

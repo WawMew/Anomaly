@@ -11,7 +11,8 @@ struct ServiceCapabilityMapping {
     std::string_view capability;
 };
 
-constexpr std::array<std::string_view, 45> kKnownCapabilities{
+constexpr std::array<std::string_view, 47> kKnownCapabilities{
+    "mods",
     "commands",
     "configuration",
     "diagnostics",
@@ -39,13 +40,13 @@ constexpr std::array<std::string_view, 45> kKnownCapabilities{
     "nte-skills-read",
     "nte-session-snapshot",
     "nte-snapshot-metrics",
-    "nte-vehicle",
     "notifications",
     "runtime-info",
     "scheduler",
     "storage",
     "input",
     "ui-font",
+    "ui-overlay",
     "ui-texture",
     "ui-window",
     "ue5-build",
@@ -54,12 +55,14 @@ constexpr std::array<std::string_view, 45> kKnownCapabilities{
     "ue5-objects",
     "ue5-world",
     "ue5-streaming-source",
+    "ue5-assets",
     "ui",
     "json",
     "websocket",
 };
 
-constexpr std::array<ServiceCapabilityMapping, 45> kServiceCapabilities{{
+constexpr std::array<ServiceCapabilityMapping, 47> kServiceCapabilities{{
+    {"anomaly.mods", "mods"},
     {"anomaly.plugin-state", "configuration"},
     {"anomaly.config", "configuration"},
     {"anomaly.storage", "storage"},
@@ -80,6 +83,7 @@ constexpr std::array<ServiceCapabilityMapping, 45> kServiceCapabilities{{
     {"anomaly.texture", "ui-texture"},
     {"anomaly.input", "input"},
     {"anomaly.json", "json"},
+    {"anomaly.profile", "json"},
     {"anomaly.ue5.build", "ue5-build"},
     {"anomaly.ue5.ahud", "ue5-ahud"},
     {"anomaly.ue5.framework", "game-events"},
@@ -88,6 +92,7 @@ constexpr std::array<ServiceCapabilityMapping, 45> kServiceCapabilities{{
     {"anomaly.ue5.objects", "ue5-objects"},
     {"anomaly.ue5.world", "ue5-world"},
     {"anomaly.ue5.streaming-source", "ue5-streaming-source"},
+    {"anomaly.ue5.assets", "ue5-assets"},
     {"anomaly.nte.build", "nte-build"},
     {"anomaly.nte.session", "nte-session-snapshot"},
     {"anomaly.nte.metrics", "nte-snapshot-metrics"},
@@ -96,7 +101,6 @@ constexpr std::array<ServiceCapabilityMapping, 45> kServiceCapabilities{{
     {"anomaly.nte.player-hold", "nte-player-hold"},
     {"anomaly.nte.map-landmarks", "nte-map-landmarks"},
     {"anomaly.nte.navigation", "nte-navigation"},
-    {"anomaly.nte.vehicle", "nte-vehicle"},
     {"anomaly.nte.pickup", "nte-pickup"},
     {"anomaly.nte.ui-buttons", "nte-ui-buttons"},
     {"anomaly.nte.entities", "nte-entity-snapshot"},

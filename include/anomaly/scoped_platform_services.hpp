@@ -136,6 +136,8 @@ public:
         AnomalyTaskCallbackV1 callback,
         void* callback_user,
         AnomalyGenerationHandleV1* handle) noexcept;
+    // Host-only identity check for callbacks dispatched by anomaly.scheduler.
+    [[nodiscard]] bool IsWorkerThread() const noexcept;
     [[nodiscard]] AnomalyStatusV1 CancelTask(
         const ScopedPluginServiceOwner& owner, AnomalyGenerationHandleV1 handle) noexcept;
 
@@ -172,6 +174,15 @@ public:
         std::string_view pattern,
         std::uintptr_t* address,
         bool allow_recovery_io = true) noexcept;
+    [[nodiscard]] AnomalyStatusV1 ResolveSignatures(
+        const ScopedPluginServiceOwner& owner,
+        std::string_view module_name,
+        std::string_view section_name,
+        const AnomalyStringViewV1* patterns,
+        std::uint32_t count,
+        std::uint32_t* status_codes,
+        std::uintptr_t* addresses,
+        bool allow_recovery_io = true) noexcept;
     [[nodiscard]] AnomalyStatusV1 ResolveSignatureLayout(
         const ScopedPluginServiceOwner& owner,
         const AnomalySignatureLayoutRequestV2* request,
@@ -201,11 +212,11 @@ public:
     [[nodiscard]] AnomalyStatusV1 ReleasePatch(
         const ScopedPluginServiceOwner& owner, AnomalyGenerationHandleV1 handle) noexcept;
 
-    // Stops tracked hooks before releasing their outer scope records. PreStop
-    // retains Config schemas so an on_stop lifecycle callback can persist its
-    // final settings; Final revokes every remaining scoped resource before
-    // on_unload. A failed hook drain/removal leaves its record intact so the
-    // caller can quarantine the generation instead of unmapping its DLL.
+    // PreStop is the host fallback after an on_stop lifecycle callback had a
+    // chance to release its own hooks. It releases non-config platform records;
+    // Final revokes every remaining scoped resource before on_unload. A failed
+    // hook drain/removal leaves its record intact so the caller can quarantine
+    // the generation instead of unmapping its DLL.
     [[nodiscard]] bool RevokeScope(
         const ScopedPluginServiceOwner& owner,
         std::chrono::steady_clock::time_point deadline,

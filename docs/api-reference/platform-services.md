@@ -138,6 +138,70 @@ plugin generation 一起失效。
 
 ---
 
+## `anomaly.profile`
+
+- **ID**：`"anomaly.profile"` · **版本** 1 · **capability** `json`
+- 头文件：`anomaly/sdk/services/profile.h`；C++ 辅助：`anomaly/sdk/profile.hpp`。
+- manifest 同时声明 `anomaly.profile` 和 `anomaly.json` v1。
+
+```c
+typedef struct AnomalyProfileServiceV1 {
+    uint32_t struct_size; uint32_t service_version; void* user;
+    AnomalyStatusV1 (ANOMALY_CALL *load)(void* user,
+        AnomalyStringViewV1 relative_path, AnomalyGenerationHandleV1* document);
+} AnomalyProfileServiceV1;
+```
+
+`load("my-plugin.profile.json")` 从插件当前 DLL generation 的包快照中读取
+`profile/my-plugin.profile.json`，不访问用户 state/config 目录。仅 Lifecycle/Worker 可调用；
+Game/Render 返回 `UNAVAILABLE`。输入必须是 UTF-8 相对 `.json` 路径，最多 512 字节；拒绝绝对路径、
+父目录遍历、reparse 和超过 1 MiB 的文件。缺失文件返回 `NOT_FOUND`，路径、格式或 schema
+错误返回 `INVALID_ARGUMENT`，I/O 故障返回 `FAILED`；失败时输出句柄为零。
+
+返回值是只读 `anomaly.json` 文档句柄，使用该服务查询并 `release`。每个 child handle 独立持有
+文档，释放 root 不影响尚存的 child；所有句柄均受 generation 和 PluginScope 管理。C++
+`LoadProfile` 返回包含字符串、布局和候选的自有 `Profile` 快照，返回前释放临时宿主句柄，
+无需插件依赖第三方 JSON 库。`Profile::symbol(name)` 对未声明名称抛出 `std::out_of_range`，
+插件应在安装 Hook 前检查自身需要的字段。
+
+同一公开头文件还提供插件侧 C++ 辅助接口，随独立 SDK 安装，不改变 C ABI：
+
+- `ProfileContract{game, module, section, contract}` 与 `LoadProfile(host, filename, expected)`：
+  校验调用方声明的语义合同；`Profile::Matches` 可校验已有快照。
+- `Profile::Value(key, maximum, alignment=1)`：检查必需字段、上界及对齐，失败抛出异常，不能跨 DLL 回调边界传播。
+- `MatchesProfileEntry(core, profile, symbol, address, observer_detour=false)`：在受控地址校验入口。
+  最后一个参数仅用于宿主五字节 E9 observer detour，启用后仍必须匹配剩余入口字节。
+- `ProfileScanCache::Prepare(host, profile, symbols, prefer_batch=true)` / `Resolve(core, profile, name)`：
+  同一 Profile 的指定符号共用去重扫描结果；`Resolve` 仍校验唯一候选、调用目标及入口。仅在本次初始化内使用缓存。
+- `ProfileSnapshot::Load(api, filename, expected, known_entries={}, batch_signatures=false, layout_symbol={})`：
+  加载与解析后发布插件自有快照，提供 `Address`、`Selected`、`Pattern`、`Value`、`MatchesEntry`、`Document`。
+  指定的布局符号必须唯一解析成功；其他未解析符号地址为零，由插件停用依赖功能。失败不替换旧快照，
+  调用方必须检查返回值；成功加载、赋值或销毁会使旧的借用引用失效。初始化和读取不得并发。
+
+这些接口没有 NTE 默认条件，布局候选符号由插件显式指定。原有 `LoadProfile` 和
+`ResolveProfileSymbol` 保持可用。详见[插件开发中的 Profile 示例](../developer-guide/plugin-development.md)。
+
+所有插件共用仓库 `schemas/plugin-profile.schema.json`（SDK 安装到 `share/anomaly/schemas/`）。
+`schemaVersion` 固定为 1，不接受未知根字段、重复键或重复符号名：
+
+| 字段 | 内容 |
+| --- | --- |
+| `game` / `module` / `section` | 游戏标识、模块名与 PE 节名 |
+| `contract` | 插件实现的语义合同；不包含或匹配 Build identity |
+| `layout` | 名称到 uint32 的共享偏移、尺寸与种子 |
+| `symbols` | 0–128 个 `{name, candidates}`，每个符号 1–16 个候选 |
+| 候选 `pattern` / `entry` | 空格分隔的十六进制字节；仅 pattern 允许 `??`，entry 必须精确 |
+| 候选 `callOffset` | 可选 E8 rel32 指令位置，必须落在 pattern 范围内 |
+| 候选 `values` | 该候选特有的 uint32 布局数据 |
+
+C++ `ResolveProfileSymbol(signature, core, profile, name)` 使用现有 signature/memory 服务，
+检查唯一候选、可选 E8 rel32 目标与精确入口字节；失败返回空结果和 `error`，不安装 Hook。
+成功结果的 `candidate` 借用输入 profile，使用期间须保持该快照存活。该 helper 还需
+`interop-signature` 和 `memory-read` capability。Schema 校验不等于布局已适配，插件仍须
+校验语义合同、所需字段和调用协议；不能用编译期签名或偏移作为失败兜底。
+
+---
+
 ## `anomaly.runtime-info`
 
 - **ID**：`"anomaly.runtime-info"` · **版本** 1 · **capability** `runtime-info`

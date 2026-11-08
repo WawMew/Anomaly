@@ -1,26 +1,185 @@
 #pragma once
-#include <cstdint>
-
+#include <anomaly/sdk/profile.hpp>
 namespace accessory::profile {
-// Verified against HTGame_dump.exe supplied on 2026-09-29. Signatures must resolve
-// uniquely; reflection layout checks are required before enabling replacement.
-inline constexpr auto GetAppearance = "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 20 80 B9 50 2A 00 00 00 48 8B F2 48 8B F9 0F 84 A4 00 00 00";
-inline constexpr auto Refresh = "40 55 41 55 48 8D AC 24 88 FD FF FF 48 81 EC 78 03 00 00 48 8B 05 ?? ?? ?? ?? 48 33 C4 48 89 85 50 02 00 00 48 FF 81 58 2A 00 00 4C 8B E9 48 8B 81 58 2A 00 00 48 89 44 24 70 48 89 4D 90";
-inline constexpr auto World = "48 8B 1D ?? ?? ?? ?? 48 85 DB 74 ?? 41 B0 01";
-inline constexpr auto Objects = "48 8B 05 ?? ?? ?? ?? 48 8B 0C C8 48 8B 04 D1 C3 33 C0 48 8B 00 C3";
-inline constexpr auto GliderSpawn = "40 55 53 57 48 8D 6C 24 B9 48 81 EC A0 00 00 00 48 8B FA 48 8B D9 E8 ?? ?? ?? ?? 48 85 C0 0F 84 2E 01 00 00 48 83 7F 08 00";
-inline constexpr auto GliderRefresh = "48 8B C4 55 48 8D 68 A1 48 81 EC A0 00 00 00 48 89 58 08 48 8B D9 4C 89 70 E8 E8 ?? ?? ?? ?? 45 33 F6 48 85 C0 74 7E 48 8B 88 98 00 00 00 48 85 C9 74 72 48 8B 93 A0 2A 00 00";
-inline constexpr auto SoftClassAssign = "48 89 5C 24 18 56 48 83 EC 40 48 8B 02 48 8D 71 18 48 89 01 48 8B D9 0F 10 42 08 48 83 C2 18 0F 11 41 08 48 3B F2 74 62";
-inline constexpr std::uint32_t GliderSpawnCall=0x156, GliderId=0x2aa0, GliderActor=0x3b40, GliderLoading=0x3b48;
-inline constexpr std::uint32_t CopyNamesCall = 0x163;
-inline constexpr std::uint32_t WorldGameInstance = 0x230, LocalPlayers = 0x38;
-inline constexpr std::uint32_t Controller = 0x30, Pawn = 0x308;
-inline constexpr std::uint32_t ObjectClass = 0x10, Super = 0x40, PropertyLink = 0x70;
-inline constexpr std::uint32_t FieldName = 0x20, PropertyOffset = 0x44, PropertyNext = 0x48;
-inline constexpr std::uint32_t DisplayCharacter = 0x29e4;
-inline constexpr std::uint32_t AppearanceType = 0x08, AppearanceCharacter = 0x0c;
-inline constexpr std::uint32_t AppearanceName = 0x30, AppearanceData = 0x1b8;
-inline constexpr std::uint32_t AppearanceCharacterShow = 0x211;
-inline constexpr std::uint32_t RowStruct = 0x28, RowMap = 0x30;
-inline constexpr std::uint32_t RegistryItems = 0x10, RegistryCount = 0x24, ItemStride = 24, Serial = 16;
+struct Layout {
+    std::uint32_t DrivingStateSize{};
+    std::uint32_t WaterDrivingStateSize{};
+    std::uint32_t MapSize{};
+    std::uint32_t ScalarRecordName{};
+    std::uint32_t ScalarParameterInfoSize{};
+
+    std::uint32_t ScriptStructSize{};
+    std::uint32_t RipDisplacement{};
+    std::uint32_t RipInstructionSize{};
+    std::uint32_t DecorationPart{};
+    std::uint32_t DecorationMeshDatas{};
+    std::uint32_t GlideActorClass{};
+    std::uint32_t ScalarRecordSize{};
+    std::uint32_t ScalarRecordValue{};
+    std::uint32_t PaintColorIndex{};
+    std::uint32_t GliderSpawnCall{};
+    std::uint32_t GliderId{};
+    std::uint32_t GliderActor{};
+    std::uint32_t GliderLoading{};
+    std::uint32_t CopyNamesCall{};
+    std::uint32_t WorldGameInstance{};
+    std::uint32_t LocalPlayers{};
+    std::uint32_t Controller{};
+    std::uint32_t Pawn{};
+    std::uint32_t ObjectClass{};
+    std::uint32_t Super{};
+    std::uint32_t PropertyLink{};
+    std::uint32_t FieldName{};
+    std::uint32_t PropertyOffset{};
+    std::uint32_t PropertyNext{};
+    std::uint32_t DisplayCharacter{};
+    std::uint32_t AppearanceType{};
+    std::uint32_t AppearanceCharacter{};
+    std::uint32_t AppearanceName{};
+    std::uint32_t AppearanceData{};
+    std::uint32_t AppearanceCharacterShow{};
+    std::uint32_t RowStruct{};
+    std::uint32_t RowMap{};
+    std::uint32_t RegistryItems{};
+    std::uint32_t RegistryCount{};
+    std::uint32_t ItemStride{};
+    std::uint32_t Serial{};
+    std::uint32_t ObjectName{};
+    std::uint32_t ObjectIndex{};
+    std::uint32_t ObjectOuter{};
+    std::uint32_t PropertySize{};
+    std::uint32_t FunctionCount{};
+    std::uint32_t FunctionSize{};
+    std::uint32_t FunctionFlags{};
+    std::uint32_t FunctionNative{};
+    std::uint32_t ChunkSize{};
+    std::uint32_t RegistrySubtract{};
+    std::uint32_t ArrayCount{};
+    std::uint32_t ProcessEventSlot{};
+    std::uint32_t MapBitsData{};
+    std::uint32_t MapBitCount{};
+    std::uint32_t MapBitCapacity{};
+    std::uint32_t MapFreeCount{};
+    std::uint32_t MapInlineBits{};
+    std::uint32_t MapEntryStride{};
+    std::uint32_t MapValue{};
+    std::uint32_t RefreshGetterCall{};
+    std::uint32_t PaintScalarThunkCall{};
+    std::uint32_t PaintArrayThunkCall{};
+    std::uint32_t PaintScalarBodyCall{};
+    std::uint32_t PaintArrayBodyCall{};
+    std::uint32_t VehicleRowId{};
+    std::uint32_t VehicleRowOwner{};
+    std::uint32_t VehicleRowName{};
+    std::uint32_t VehicleRowType{};
+    std::uint32_t DecorationType{};
+    std::uint32_t DecorationName{};
+    std::uint32_t InstancedStructData{};
+    std::uint32_t InventoryContainerStride{};
+    std::uint32_t InventoryContainerMap{};
+    std::uint32_t AwakenList{};
+};
+inline Layout native_layout;
+inline anomaly::sdk::ProfileSnapshot compatibility;
+inline constexpr auto GetAppearance = "layout";
+inline constexpr auto Refresh = "Refresh";
+inline constexpr auto World = "World";
+inline constexpr auto Objects = "Objects";
+inline constexpr auto GliderSpawn = "GliderSpawn";
+inline constexpr auto GliderRefresh = "GliderRefresh";
+inline constexpr auto SoftClassAssign = "SoftClassAssign";
+inline bool LoadCompatibility(const AnomalyHostApiV1* host) noexcept {
+    native_layout={};
+    compatibility={};
+    try {
+        anomaly::sdk::ProfileSnapshot parsed_profile;
+        if (!parsed_profile.Load(host,"compatibility.profile.json",{"nte", "HTGame.exe", ".text", "skin-changer-v1"}, {"Paint.entry","ProcessEvent.entry"}, false, "layout") || !parsed_profile.Address(GetAppearance)) return false;
+        Layout parsed;
+        parsed.DrivingStateSize=parsed_profile.Value("DrivingStateSize",65536);
+        parsed.WaterDrivingStateSize=parsed_profile.Value("WaterDrivingStateSize",65536);
+        parsed.MapSize=parsed_profile.Value("MapSize",65536);
+        parsed.ScalarRecordName=parsed_profile.Value("ScalarRecordName",65536);
+        parsed.ScalarParameterInfoSize=parsed_profile.Value("ScalarParameterInfoSize",65536);
+
+        parsed.ScriptStructSize=parsed_profile.Value("awakening.ScriptStructSize",65536);
+        parsed.RipDisplacement=parsed_profile.Value("RipDisplacement",65536);
+        parsed.RipInstructionSize=parsed_profile.Value("RipInstructionSize",65536);
+        parsed.DecorationPart=parsed_profile.Value("DecorationPart",65536);
+        parsed.DecorationMeshDatas=parsed_profile.Value("DecorationMeshDatas",65536);
+        parsed.GlideActorClass=parsed_profile.Value("GlideActorClass",65536);
+        parsed.ScalarRecordSize=parsed_profile.Value("ScalarRecordSize",65536);
+        parsed.ScalarRecordValue=parsed_profile.Value("ScalarRecordValue",65536);
+        parsed.PaintColorIndex=parsed_profile.Value("PaintColorIndex",65536);
+        parsed.GliderSpawnCall=parsed_profile.Value("GliderSpawnCall",65536);
+        parsed.GliderId=parsed_profile.Value("GliderId",65536);
+        parsed.GliderActor=parsed_profile.Value("GliderActor",65536);
+        parsed.GliderLoading=parsed_profile.Value("GliderLoading",65536);
+        parsed.CopyNamesCall=parsed_profile.Value("CopyNamesCall",65536);
+        parsed.WorldGameInstance=parsed_profile.Value("WorldGameInstance",65536);
+        parsed.LocalPlayers=parsed_profile.Value("LocalPlayers",65536);
+        parsed.Controller=parsed_profile.Value("Controller",65536);
+        parsed.Pawn=parsed_profile.Value("Pawn",65536);
+        parsed.ObjectClass=parsed_profile.Value("ObjectClass",65536);
+        parsed.Super=parsed_profile.Value("Super",65536);
+        parsed.PropertyLink=parsed_profile.Value("PropertyLink",65536);
+        parsed.FieldName=parsed_profile.Value("FieldName",65536);
+        parsed.PropertyOffset=parsed_profile.Value("PropertyOffset",65536);
+        parsed.PropertyNext=parsed_profile.Value("PropertyNext",65536);
+        parsed.DisplayCharacter=parsed_profile.Value("DisplayCharacter",65536);
+        parsed.AppearanceType=parsed_profile.Value("AppearanceType",65536);
+        parsed.AppearanceCharacter=parsed_profile.Value("AppearanceCharacter",65536);
+        parsed.AppearanceName=parsed_profile.Value("AppearanceName",65536);
+        parsed.AppearanceData=parsed_profile.Value("AppearanceData",65536);
+        parsed.AppearanceCharacterShow=parsed_profile.Value("AppearanceCharacterShow",65536);
+        parsed.RowStruct=parsed_profile.Value("RowStruct",65536);
+        parsed.RowMap=parsed_profile.Value("RowMap",65536);
+        parsed.RegistryItems=parsed_profile.Value("RegistryItems",65536);
+        parsed.RegistryCount=parsed_profile.Value("RegistryCount",65536);
+        parsed.ItemStride=parsed_profile.Value("ItemStride",65536);
+        parsed.Serial=parsed_profile.Value("Serial",65536);
+        parsed.ObjectName=parsed_profile.Value("ObjectName",65536);
+        parsed.ObjectIndex=parsed_profile.Value("ObjectIndex",65536);
+        parsed.ObjectOuter=parsed_profile.Value("ObjectOuter",65536);
+        parsed.PropertySize=parsed_profile.Value("PropertySize",65536);
+        parsed.FunctionCount=parsed_profile.Value("FunctionCount",65536);
+        parsed.FunctionSize=parsed_profile.Value("FunctionSize",65536);
+        parsed.FunctionFlags=parsed_profile.Value("FunctionFlags",65536);
+        parsed.FunctionNative=parsed_profile.Value("FunctionNative",65536);
+        parsed.ChunkSize=parsed_profile.Value("ChunkSize",65536);
+        parsed.RegistrySubtract=parsed_profile.Value("RegistrySubtract",65536);
+        parsed.ArrayCount=parsed_profile.Value("ArrayCount",65536);
+        parsed.ProcessEventSlot=parsed_profile.Value("ProcessEventSlot",65536);
+        parsed.MapBitsData=parsed_profile.Value("MapBitsData",65536);
+        parsed.MapBitCount=parsed_profile.Value("MapBitCount",65536);
+        parsed.MapBitCapacity=parsed_profile.Value("MapBitCapacity",65536);
+        parsed.MapFreeCount=parsed_profile.Value("MapFreeCount",65536);
+        parsed.MapInlineBits=parsed_profile.Value("MapInlineBits",65536);
+        parsed.MapEntryStride=parsed_profile.Value("MapEntryStride",65536);
+        parsed.MapValue=parsed_profile.Value("MapValue",65536);
+        parsed.RefreshGetterCall=parsed_profile.Value("RefreshGetterCall",65536);
+        parsed.PaintScalarThunkCall=parsed_profile.Value("PaintScalarThunkCall",65536);
+        parsed.PaintArrayThunkCall=parsed_profile.Value("PaintArrayThunkCall",65536);
+        parsed.PaintScalarBodyCall=parsed_profile.Value("PaintScalarBodyCall",65536);
+        parsed.PaintArrayBodyCall=parsed_profile.Value("PaintArrayBodyCall",65536);
+        parsed.VehicleRowId=parsed_profile.Value("VehicleRowId",65536);
+        parsed.VehicleRowOwner=parsed_profile.Value("VehicleRowOwner",65536);
+        parsed.VehicleRowName=parsed_profile.Value("VehicleRowName",65536);
+        parsed.VehicleRowType=parsed_profile.Value("VehicleRowType",65536);
+        parsed.DecorationType=parsed_profile.Value("DecorationType",65536);
+        parsed.DecorationName=parsed_profile.Value("DecorationName",65536);
+        parsed.InstancedStructData=parsed_profile.Value("InstancedStructData",65536);
+        parsed.InventoryContainerStride=parsed_profile.Value("InventoryContainerStride",65536);
+        parsed.InventoryContainerMap=parsed_profile.Value("InventoryContainerMap",65536);
+        parsed.AwakenList=parsed_profile.Value("AwakenList",65536);
+        if (!parsed.ChunkSize || parsed.ItemStride < sizeof(void*) || parsed.Serial + sizeof(std::uint32_t)>parsed.ItemStride ||
+            parsed.ProcessEventSlot % sizeof(void*) || !parsed.MapEntryStride || parsed.MapValue + sizeof(void*)>parsed.MapEntryStride) return false;
+        if (parsed.RipDisplacement + sizeof(std::int32_t) > parsed.RipInstructionSize ||
+            parsed.RipInstructionSize > 16 || parsed.ScalarRecordSize > 256 ||
+            parsed.ScalarRecordValue < sizeof(std::uint64_t) ||
+            parsed.ScalarRecordValue + sizeof(float) > parsed.ScalarRecordSize || parsed.PaintColorIndex >= 36) return false;
+        compatibility=std::move(parsed_profile);
+        native_layout=parsed;
+        return true;
+    } catch (...) { return false; }
+}
 }

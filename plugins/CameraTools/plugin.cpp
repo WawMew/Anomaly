@@ -53,6 +53,7 @@ constexpr std::string_view kSettingsSchema = R"json(
     "distance":{"type":"number","minimum":0.0},
     "fov":{"type":"number","minimum":0.0,"maximum":170.0,"default":0.0},
     "freeCameraEnabled":{"type":"boolean"},
+    "blockForcedRotation":{"type":"boolean","default":false},
     "lodFollowsCamera":{"type":"boolean","default":false},
     "speed":{"type":"number","minimum":100.0,"maximum":5000.0},
     "toggle":{"type":"integer","minimum":1,"maximum":255},
@@ -63,6 +64,9 @@ constexpr std::string_view kSettingsSchema = R"json(
 
 using CameraViewPointFn = void(ANOMALY_CALL *)(void *, double *, double *);
 using PlayerInputKeyFn = bool(ANOMALY_CALL *)(void *, const void *);
+// AHTPlayerCameraManager::ProcessViewRotation(float, FRotator&, FRotator&).
+// Both SDKs use three doubles for FRotator; the second argument is in XMM1.
+using ProcessViewRotationFn = void(ANOMALY_CALL *)(void *, float, double *, double *);
 
 struct Context final {
   const AnomalyHostApiV1 *host{};
@@ -78,6 +82,13 @@ struct Context final {
   AnomalyGenerationHandleV1 teleport_hotkey{};
   AnomalyGenerationHandleV1 view_point_hook{};
   AnomalyGenerationHandleV1 input_key_hook{};
+  AnomalyGenerationHandleV1 process_rotation_hook{};
+  std::uintptr_t process_rotation_original{};
+  std::uintptr_t process_rotation_target{};
+  std::atomic_bool block_forced_rotation{};
+  std::atomic<std::uintptr_t> rotation_manager{};
+  std::atomic_bool manual_rotation_valid{};
+  std::array<std::atomic<double>, 3> manual_rotation{};
   std::atomic<double> distance{kDefaultDistance};
   std::atomic<float> fov{kDefaultFov};
   std::atomic<float> fov_game{};
@@ -95,6 +106,7 @@ struct Context final {
   std::atomic_bool camera_position_valid{};
   std::atomic_bool streaming_source_follows_camera{};
   bool streaming_source_armed{};
+  bool streaming_source_unavailable_reported{};
   const AnomalyUe5StreamingSourceServiceV1 *streaming_source{};
   std::atomic_bool developer_mode{};
   std::atomic_bool teleport_pending{};
@@ -289,15 +301,9 @@ bool AddAddress(const std::uintptr_t base, const std::uint64_t offset,
 
 bool ResolveSignature(Context &context, const std::string_view pattern,
                       std::uintptr_t &address) noexcept {
-  address = 0;
-  return SignatureReady(context.signature) &&
-         context.signature
-                 ->resolve(context.signature->user,
-                           anomaly::sdk::StringView("HTGame.exe"),
-                           anomaly::sdk::StringView(".text"),
-                           anomaly::sdk::StringView(pattern), &address)
-                 .code == ANOMALY_STATUS_V1_OK &&
-         address != 0;
+  (void)context;
+  address = compatibility.Address(pattern);
+  return address != 0;
 }
 
 bool ResolveRipRelative(Context &context, const std::string_view pattern,
@@ -333,25 +339,25 @@ bool NameEquals(Context &context, const std::uint32_t name_id,
                 const std::string_view expected) noexcept {
   if (expected.empty() || expected.size() > 15U)
     return false;
-  const auto block_index = name_id >> kNameBlockBits;
-  const auto entry_offset = name_id & ((1U << kNameBlockBits) - 1U);
+  const auto block_index = name_id >> native_layout.kNameBlockBits;
+  const auto entry_offset = name_id & ((1U << native_layout.kNameBlockBits) - 1U);
   std::uintptr_t block{};
   if (!ReadPointerAtOffset(context, context.f_name_pool_address,
-                           kNamePoolBlocksOffset +
+                           native_layout.kNamePoolBlocksOffset +
                                block_index * sizeof(std::uintptr_t),
                            block)) {
     return false;
   }
   std::uintptr_t entry{};
   if (!AddAddress(block,
-                  static_cast<std::uint64_t>(entry_offset) * kNameEntryStride,
+                  static_cast<std::uint64_t>(entry_offset) * native_layout.kNameEntryStride,
                   entry)) {
     return false;
   }
   std::uint16_t header{};
   std::array<char, 16> name{};
   if (!Read(context, entry, header) || (header & 1U) != 0 ||
-      (header >> kNameLengthShift) != expected.size() ||
+      (header >> native_layout.kNameLengthShift) != expected.size() ||
       !Read(context, entry + sizeof(header), name)) {
     return false;
   }
@@ -359,9 +365,9 @@ bool NameEquals(Context &context, const std::uint32_t name_id,
 }
 
 bool MouseAxisNamesValid(Context &context) noexcept {
-  return NameEquals(context, kMouseXNameId, "MouseX") &&
-         NameEquals(context, kMouseYNameId, "MouseY") &&
-         NameEquals(context, kMouse2DNameId, "Mouse2D");
+  return NameEquals(context, native_layout.kMouseXNameId, "MouseX") &&
+         NameEquals(context, native_layout.kMouseYNameId, "MouseY") &&
+         NameEquals(context, native_layout.kMouse2DNameId, "Mouse2D");
 }
 
 bool IsMouseAxisInput(const void *parameters) noexcept {
@@ -369,9 +375,9 @@ bool IsMouseAxisInput(const void *parameters) noexcept {
     return false;
   const auto *bytes = static_cast<const std::uint8_t *>(parameters);
   const auto name_id = *reinterpret_cast<const std::uint32_t *>(
-      bytes + kInputKeyEventArgsKeyOffset);
-  return name_id == kMouseXNameId || name_id == kMouseYNameId ||
-         name_id == kMouse2DNameId;
+      bytes + native_layout.kInputKeyEventArgsKeyOffset);
+  return name_id == native_layout.kMouseXNameId || name_id == native_layout.kMouseYNameId ||
+         name_id == native_layout.kMouse2DNameId;
 }
 
 bool ResolveLocalPlayerController(Context &context,
@@ -382,13 +388,13 @@ bool ResolveLocalPlayerController(Context &context,
   std::uintptr_t local_players{};
   std::uintptr_t local_player{};
   return Read(context, context.g_world_address, world) && world != 0 &&
-         ReadPointerAtOffset(context, world, kWorldGameInstanceOffset,
+         ReadPointerAtOffset(context, world, native_layout.kWorldGameInstanceOffset,
                              game_instance) &&
          ReadPointerAtOffset(context, game_instance,
-                             kGameInstanceLocalPlayersOffset, local_players) &&
+                             native_layout.kGameInstanceLocalPlayersOffset, local_players) &&
          Read(context, local_players, local_player) && local_player != 0 &&
          ReadPointerAtOffset(context, local_player,
-                             kLocalPlayerControllerOffset, controller);
+                             native_layout.kLocalPlayerControllerOffset, controller);
 }
 
 bool ResolveActiveCameraManager(Context &context,
@@ -399,9 +405,9 @@ bool ResolveActiveCameraManager(Context &context,
   std::uintptr_t view_point{};
   return ResolveLocalPlayerController(context, controller) &&
          ReadPointerAtOffset(context, controller,
-                             kControllerCameraManagerOffset, manager) &&
+                             native_layout.kControllerCameraManagerOffset, manager) &&
          Read(context, manager, vtable) && vtable != 0 &&
-         ReadPointerAtOffset(context, vtable, kCameraViewPointVtableOffset,
+         ReadPointerAtOffset(context, vtable, native_layout.kCameraViewPointVtableOffset,
                              view_point) &&
          view_point == context.view_point_target;
 }
@@ -413,10 +419,10 @@ bool ResolveActivePlayerInput(Context &context,
   std::uintptr_t vtable{};
   std::uintptr_t input_key{};
   return ResolveLocalPlayerController(context, controller) &&
-         ReadPointerAtOffset(context, controller, kControllerPlayerInputOffset,
+         ReadPointerAtOffset(context, controller, native_layout.kControllerPlayerInputOffset,
                              player_input) &&
          Read(context, player_input, vtable) && vtable != 0 &&
-         ReadPointerAtOffset(context, vtable, kPlayerInputKeyVtableOffset,
+         ReadPointerAtOffset(context, vtable, native_layout.kPlayerInputKeyVtableOffset,
                              input_key) &&
          input_key == context.input_key_target;
 }
@@ -428,6 +434,9 @@ bool StreamingSourceMethodsAvailable(
     const AnomalyUe5StreamingSourceServiceV1 *service) noexcept {
   return service != nullptr &&
          service->service_version >= ANOMALY_UE5_STREAMING_SOURCE_SERVICE_V1_VERSION &&
+         HasField<AnomalyUe5StreamingSourceServiceV1,
+                  decltype(AnomalyUe5StreamingSourceServiceV1::clear_override)>(
+             service, offsetof(AnomalyUe5StreamingSourceServiceV1, clear_override)) &&
          service->set_override != nullptr && service->clear_override != nullptr;
 }
 
@@ -436,9 +445,16 @@ void SyncStreamingSourceOverride(Context &context) noexcept {
       context.enabled.load(std::memory_order_acquire) &&
       context.active.load(std::memory_order_acquire) &&
       context.streaming_source_follows_camera.load(std::memory_order_acquire);
+  // The optional service can be published after this plugin's Load callback.
+  if (follows && !StreamingSourceMethodsAvailable(context.streaming_source)) {
+    context.streaming_source = Query<AnomalyUe5StreamingSourceServiceV1>(
+        context.host, ANOMALY_UE5_STREAMING_SOURCE_SERVICE_V1_ID,
+        ANOMALY_UE5_STREAMING_SOURCE_SERVICE_V1_VERSION);
+  }
   if (!StreamingSourceMethodsAvailable(context.streaming_source)) {
-    if (context.streaming_source_armed || follows) {
-      context.streaming_source_armed = false;
+    if ((context.streaming_source_armed || follows) &&
+        !context.streaming_source_unavailable_reported) {
+      context.streaming_source_unavailable_reported = true;
       Log(context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
           "streaming override unavailable: the anomaly.ue5.streaming-source service "
           "is not published for this Profile");
@@ -446,6 +462,7 @@ void SyncStreamingSourceOverride(Context &context) noexcept {
     context.streaming_source_armed = false;
     return;
   }
+  context.streaming_source_unavailable_reported = false;
   if (!follows) {
     if (context.streaming_source_armed) {
       context.streaming_source_armed = false;
@@ -483,7 +500,7 @@ bool ResolveCameraPov(Context &context, const std::uintptr_t manager,
   std::uintptr_t vtable{};
   std::uintptr_t accessor{};
   if (!Read(context, manager, vtable) || vtable == 0 ||
-      !ReadPointerAtOffset(context, vtable, kCameraPovAccessorVtableOffset,
+      !ReadPointerAtOffset(context, vtable, native_layout.kCameraPovAccessorVtableOffset,
                            accessor)) {
     return false;
   }
@@ -515,6 +532,8 @@ void RefreshCameraPov(Context &context, const std::uintptr_t manager) noexcept {
 void RefreshCameraManager(Context &context) noexcept {
   std::uintptr_t manager{};
   if (!ResolveActiveCameraManager(context, manager)) {
+    context.rotation_manager.store(0, std::memory_order_release);
+    context.manual_rotation_valid.store(false, std::memory_order_release);
     context.camera_manager.store(0, std::memory_order_release);
     context.camera_pov.store(0, std::memory_order_release);
     context.camera_position_valid.store(false, std::memory_order_release);
@@ -524,6 +543,13 @@ void RefreshCameraManager(Context &context) noexcept {
   const auto previous =
       context.camera_manager.exchange(manager, std::memory_order_acq_rel);
   if (previous != manager) {
+    context.manual_rotation_valid.store(false, std::memory_order_release);
+    std::uintptr_t vtable{}, process_rotation{};
+    const bool rotation_valid = process_view_rotation_slot != 0 &&
+        context.process_rotation_target != 0 && Read(context, manager, vtable) &&
+        ReadPointerAtOffset(context, vtable, process_view_rotation_slot, process_rotation) &&
+        process_rotation == context.process_rotation_target;
+    context.rotation_manager.store(rotation_valid ? manager : 0, std::memory_order_release);
     context.camera_position_valid.store(false, std::memory_order_release);
     context.active.store(false, std::memory_order_release);
     RefreshCameraPov(context, manager);
@@ -683,6 +709,8 @@ bool PersistSettings(Context &context) noexcept {
         nlohmann::json{
             {"distance", distance},
             {"fov", fov},
+            {"blockForcedRotation",
+             context.block_forced_rotation.load(std::memory_order_acquire)},
             {"freeCameraEnabled",
              context.configured_enabled.load(std::memory_order_acquire)},
             {"lodFollowsCamera",
@@ -723,6 +751,7 @@ bool LoadSettings(Context &context) noexcept {
                                  std::memory_order_release);
       context.configured_enabled.store(false, std::memory_order_release);
       context.enabled.store(false, std::memory_order_release);
+      context.block_forced_rotation.store(false, std::memory_order_release);
       context.streaming_source_follows_camera.store(
           false, std::memory_order_release);
       return PersistSettings(context);
@@ -749,12 +778,14 @@ bool LoadSettings(Context &context) noexcept {
     const bool has_lod = json.is_object() && json.contains("lodFollowsCamera");
     const bool has_teleport = json.is_object() && json.contains("teleport");
     const bool has_fov = json.is_object() && json.contains("fov");
-    if (!json.is_object() || json.size() < 4 || json.size() > 7 ||
+    const bool has_rotation = json.is_object() && json.contains("blockForcedRotation");
+    if (!json.is_object() || json.size() < 4 || json.size() > 8 ||
         !json.contains("distance") || !json.contains("freeCameraEnabled") ||
         !json.contains("speed") || !json.contains("toggle") ||
         json.size() != 4U + static_cast<std::size_t>(has_lod) +
                            static_cast<std::size_t>(has_teleport) +
-                           static_cast<std::size_t>(has_fov))
+                           static_cast<std::size_t>(has_fov) +
+                           static_cast<std::size_t>(has_rotation))
       return false;
     const double distance = json.at("distance").get<double>();
     const float fov = json.value("fov", kDefaultFov);
@@ -764,6 +795,7 @@ bool LoadSettings(Context &context) noexcept {
     const bool enabled = json.at("freeCameraEnabled").get<bool>();
     const bool streaming_source_follows_camera =
         json.value("lodFollowsCamera", false);
+    const bool block_forced_rotation = json.value("blockForcedRotation", false);
     if (!SettingsValid(distance, fov, speed, toggle, teleport))
       return false;
     context.distance.store(distance, std::memory_order_release);
@@ -773,6 +805,8 @@ bool LoadSettings(Context &context) noexcept {
     context.teleport_key.store(teleport, std::memory_order_release);
     context.configured_enabled.store(enabled, std::memory_order_release);
     context.enabled.store(enabled, std::memory_order_release);
+    context.block_forced_rotation.store(block_forced_rotation,
+                                        std::memory_order_release);
     context.streaming_source_follows_camera.store(
         streaming_source_follows_camera, std::memory_order_release);
     return true;
@@ -1021,7 +1055,7 @@ bool GameFovValid(const float fov) noexcept {
 void ApplyViewLens(Context &context) noexcept {
   const std::uintptr_t pov = context.camera_pov.load(std::memory_order_acquire);
   std::uintptr_t address{};
-  if (pov == 0 || !AddAddress(pov, kCameraPovFovOffset, address))
+  if (pov == 0 || !AddAddress(pov, native_layout.kCameraPovFovOffset, address))
     return;
   // The game's own lens, read out of the POV before this plugin writes to it: that read is both
   // the number the settings row shows while the setting is "game default" and the value it hands
@@ -1044,6 +1078,70 @@ void ApplyViewLens(Context &context) noexcept {
     const float game = context.fov_game.load(std::memory_order_acquire);
     if (GameFovValid(game))
       static_cast<void>(Write(context, address, game));
+  }
+}
+
+// Rotation input is already scaled by the game's input settings. Do not multiply
+// by delta time again. Clamp pitch to avoid crossing a pole; yaw/roll wrap normally.
+bool ApplyManualRotation(Context &context, double *rotation,
+                         double *delta_rotation) noexcept {
+  std::array<double, 3> next{};
+  const bool initialized = context.manual_rotation_valid.load(std::memory_order_acquire);
+  for (std::size_t axis{}; axis != next.size(); ++axis) {
+    const double previous = initialized
+        ? context.manual_rotation[axis].load(std::memory_order_acquire) : rotation[axis];
+    const double value = previous + delta_rotation[axis];
+    if (!std::isfinite(value)) return false;
+    next[axis] = std::fmod(value, 360.0);
+    if (next[axis] > 180.0) next[axis] -= 360.0;
+    if (next[axis] < -180.0) next[axis] += 360.0;
+  }
+  next[0] = (std::clamp)(next[0], -89.9, 89.9);
+  for (std::size_t axis{}; axis != next.size(); ++axis) {
+    rotation[axis] = next[axis];
+    delta_rotation[axis] = 0.0;
+    context.manual_rotation[axis].store(next[axis], std::memory_order_release);
+  }
+  context.manual_rotation_valid.store(true, std::memory_order_release);
+  return true;
+}
+
+void ANOMALY_CALL ProcessViewRotationDetour(void *object, float delta_seconds,
+                                           double *rotation, double *delta_rotation) noexcept {
+  auto *context = g_active.load(std::memory_order_acquire);
+  if (context == nullptr) return;
+  const auto original = reinterpret_cast<ProcessViewRotationFn>(context->process_rotation_original);
+  AnomalyGenerationHandleV1 lease{};
+  bool leased = false;
+  try {
+    leased = context->hook->begin_callback(context->hook->user,
+        context->process_rotation_hook, &lease).code == ANOMALY_STATUS_V1_OK;
+    const bool local = object != nullptr && reinterpret_cast<std::uintptr_t>(object) ==
+        context->rotation_manager.load(std::memory_order_acquire);
+    const bool block = leased && local && rotation != nullptr && delta_rotation != nullptr &&
+        context->block_forced_rotation.load(std::memory_order_acquire);
+    std::array<double, 3> manual{}, input{};
+    if (block) {
+      std::copy_n(rotation, 3, manual.begin());
+      std::copy_n(delta_rotation, 3, input.begin());
+    } else if (leased && local) {
+      context->manual_rotation_valid.store(false, std::memory_order_release);
+    }
+    // Keep camera state/timers running, then discard only their angular result.
+    if (original != nullptr) original(object, delta_seconds, rotation, delta_rotation);
+    if (block) {
+      if (ApplyManualRotation(*context, manual.data(), input.data())) {
+        std::copy(manual.begin(), manual.end(), rotation);
+        std::copy(input.begin(), input.end(), delta_rotation);
+      } else {
+        context->manual_rotation_valid.store(false, std::memory_order_release);
+      }
+    }
+  } catch (...) {
+    context->manual_rotation_valid.store(false, std::memory_order_release);
+  }
+  if (leased) {
+    static_cast<void>(context->hook->end_callback(context->hook->user, lease));
   }
 }
 
@@ -1076,6 +1174,15 @@ void ANOMALY_CALL CameraViewPointDetour(void *object, double *location,
       if (context != nullptr && location != nullptr && rotation != nullptr &&
           object == reinterpret_cast<void *>(context->camera_manager.load(
                         std::memory_order_acquire))) {
+        // Late camera effects can still replace the POV after control rotation.
+        // Publish the same manual orientation to rendering and the free camera.
+        if (leased && context->block_forced_rotation.load(std::memory_order_acquire) &&
+            reinterpret_cast<std::uintptr_t>(object) ==
+                context->rotation_manager.load(std::memory_order_acquire) &&
+            context->manual_rotation_valid.load(std::memory_order_acquire)) {
+          for (std::size_t axis{}; axis != 3; ++axis)
+            rotation[axis] = context->manual_rotation[axis].load(std::memory_order_acquire);
+        }
         for (std::size_t axis{}; axis != 3; ++axis) {
           context->observed_rotation[axis].store(rotation[axis],
                                                  std::memory_order_release);
@@ -1322,6 +1429,7 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1 *host,
   if (host == nullptr || plugin_context == nullptr)
     return Status(ANOMALY_STATUS_V1_INVALID_ARGUMENT);
   *plugin_context = nullptr;
+  if (!LoadCompatibility(host)) return Status(ANOMALY_STATUS_V1_UNAVAILABLE);
   auto *context = new (std::nothrow) Context();
   if (context == nullptr)
     return Status(ANOMALY_STATUS_V1_FAILED);
@@ -1384,6 +1492,8 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
     return Status(ANOMALY_STATUS_V1_UNAVAILABLE,
                   "camera tools discovery signatures are unavailable");
   }
+  context->process_rotation_target = process_view_rotation_slot != 0
+      ? compatibility.Address(kProcessViewRotation) : 0;
   RefreshCameraManager(*context);
   RefreshPlayerInput(*context);
   AnomalyHookRequestV1 view_point_request{sizeof(view_point_request)};
@@ -1456,6 +1566,23 @@ AnomalyStatusV1 ANOMALY_CALL Start(void *plugin_context) {
     return Status(ANOMALY_STATUS_V1_FAILED,
                   "camera teleport hotkey registration failed");
   }
+  if (context->process_rotation_target != 0) {
+    AnomalyHookRequestV1 request{sizeof(request)};
+    request.kind = ANOMALY_HOOK_V1_FUNCTION;
+    request.target = context->process_rotation_target;
+    request.detour = reinterpret_cast<void *>(&ProcessViewRotationDetour);
+    request.label = anomaly::sdk::StringView("camera-tools-manual-rotation");
+    const auto status = context->hook->create(context->hook->user, &request,
+        &context->process_rotation_original, &context->process_rotation_hook);
+    if (status.code != ANOMALY_STATUS_V1_OK) {
+      context->process_rotation_target = 0;
+      context->rotation_manager.store(0, std::memory_order_release);
+    }
+  }
+  if (context->process_rotation_hook.id == 0) {
+    Log(*context, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+        "manual camera rotation unavailable: ProcessViewRotation compatibility or hook failed");
+  }
   Log(*context, ANOMALY_CORE_LOG_LEVEL_V1_INFO,
       "camera tools hooks started");
   return anomaly::sdk::Ok();
@@ -1472,6 +1599,8 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context, std::uint32_t) {
   context->capturing_teleport.store(false, std::memory_order_release);
   context->teleport_pending.store(false, std::memory_order_release);
   context->developer_mode.store(false, std::memory_order_release);
+  context->rotation_manager.store(0, std::memory_order_release);
+  context->manual_rotation_valid.store(false, std::memory_order_release);
   ReleaseToggleHotkey(*context);
   ReleaseTeleportHotkey(*context);
   if (context->streaming_source_armed &&
@@ -1481,6 +1610,14 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void *plugin_context, std::uint32_t) {
         context->streaming_source->user));
   }
   AnomalyStatusV1 result = anomaly::sdk::Ok();
+  if (context->process_rotation_hook.id != 0 && HookReady(context->hook)) {
+    result = context->hook->release(context->hook->user, context->process_rotation_hook);
+    if (result.code != ANOMALY_STATUS_V1_OK && result.code != ANOMALY_STATUS_V1_NOT_FOUND)
+      return result;
+    context->process_rotation_hook = {};
+    context->process_rotation_original = 0;
+    result = anomaly::sdk::Ok();
+  }
   if (context->input_key_hook.id != 0 && HookReady(context->hook)) {
     result =
         context->hook->release(context->hook->user, context->input_key_hook);
@@ -1574,6 +1711,19 @@ void ANOMALY_CALL Draw(void *plugin_context, const AnomalyUiServiceV1 *ui) {
         ui->begin_window(ui->user, anomaly::sdk::StringView(title), &open, 0);
     window_begun = true;
     if (visible != 0) {
+      int block_rotation = context->block_forced_rotation.load(std::memory_order_acquire) ? 1 : 0;
+      const auto rotation_label = context->localizer.Label(
+          "setting.block_forced_rotation", "Block forced camera rotation", "block-forced-rotation");
+      if (ui->checkbox(ui->user, anomaly::sdk::StringView(rotation_label), &block_rotation) != 0) {
+        context->block_forced_rotation.store(block_rotation != 0, std::memory_order_release);
+        MarkSettingsDirty(*context);
+      }
+      if (block_rotation != 0 && context->rotation_manager.load(std::memory_order_acquire) == 0) {
+        const auto unavailable = context->localizer.Text(
+            "status.forced_rotation_unavailable", "Forced rotation blocking is unavailable for the current camera.");
+        ui->text(ui->user, anomaly::sdk::StringView(unavailable));
+      }
+      ui->separator(ui->user);
       const std::string view_distance_section = context->localizer.Text(
           "section.view_distance", "View Distance");
       ui->text(ui->user, anomaly::sdk::StringView(view_distance_section));
@@ -1798,7 +1948,7 @@ AnomalyPluginEntryV1(AnomalyPluginDescriptorV1 *descriptor) {
   *descriptor = {sizeof(*descriptor),
                  ANOMALY_PLUGIN_API_V1_MAJOR,
                  ANOMALY_PLUGIN_API_V1_MINOR,
-                 anomaly::sdk::StringView("anomaly.local.nte.camera-tools"),
+                 anomaly::sdk::StringView("anomaly.camera-tools"),
                  anomaly::sdk::StringView("Camera Tools"),
                  anomaly::sdk::StringView("Anomaly"),
                  anomaly::sdk::StringView("1.0.0"),

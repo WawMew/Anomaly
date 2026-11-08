@@ -2,7 +2,7 @@
 
 #include "anomaly/sdk/cpp.hpp"
 #include "anomaly/sdk/localization.hpp"
-#include <nlohmann/json.hpp>
+#include "function_contracts.hpp"
 
 #include <algorithm>
 #include <array>
@@ -17,7 +17,6 @@
 namespace character_studio {
 using Address = std::uintptr_t;
 using Handle = AnomalyGenerationHandleV1;
-using Json = nlohmann::json;
 
 inline bool Same(Handle a, Handle b) {
     return a.id == b.id && a.generation == b.generation;
@@ -60,20 +59,51 @@ struct Property {
     std::string type;
 };
 
+struct ResourceLayout {
+    std::size_t text_size{}, soft_object_size{}, instanced_size{};
+    std::size_t array_size{}, array_data{}, array_count{}, array_capacity{};
+    std::size_t map_size{}, child_stride{}, child_value{}, inline_flag_bits{};
+};
+
 class Engine {
 public:
-    Engine(Process& process, Json resource, Address registry,
+    Engine(Process& process, anomaly::sdk::Profile resource, Address registry,
            const anomaly::sdk::Localizer& l10n)
         : process_(process), resource_(std::move(resource)), registry_(registry),
           localizer(l10n) {
-        if (resource_.at("schema") != "anomaly.plugin.character-studio.layout" ||
-            resource_.at("version") != 1 || resource_.at("game") != "nte")
+        contracts_ = LoadFunctionContracts(resource_.layout);
+        if (!resource_.Matches({"nte", "HTGame.exe", ".text", "character-studio-v1"}))
+            throw std::runtime_error(
+                localizer.Text("error.layout_unsupported", "Unsupported model layout data"));
+        data_layout_ = {Offset("text.size"), Offset("softObject.size"),
+            Offset("instancedStruct.size"), Offset("array.size"), Offset("array.data"),
+            Offset("array.count"), Offset("array.capacity"), Offset("map.size"),
+            Offset("childMesh.elementStride"), Offset("childMesh.valueOffset"),
+            Offset("dataTable.rowMapInlineBits")};
+        const auto fits = [](std::size_t offset, std::size_t size, std::size_t total) {
+            return offset <= total && size <= total - offset;
+        };
+        const auto& d = data_layout_;
+        if (!d.text_size || !d.soft_object_size || !d.map_size || !d.child_stride ||
+            !d.inline_flag_bits || d.inline_flag_bits % 32 ||
+            d.soft_object_size != contracts_.at("/Script/Engine.KismetSystemLibrary.LoadAsset_Blocking")
+                                     .fields.front().size ||
+            !fits(d.array_data, sizeof(Address), d.array_size) ||
+            d.array_count < d.array_data + sizeof(Address) ||
+            !fits(d.array_count, sizeof(std::int32_t), d.array_size) ||
+            d.array_capacity < d.array_count + sizeof(std::int32_t) ||
+            !fits(d.array_capacity, sizeof(std::int32_t), d.array_size) ||
+            !fits(Offset("instancedStruct.scriptStruct"), sizeof(Address), d.instanced_size) ||
+            Offset("instancedStruct.memory") < Offset("instancedStruct.scriptStruct") + sizeof(Address) ||
+            !fits(Offset("instancedStruct.memory"), sizeof(Address), d.instanced_size) ||
+            d.child_value < sizeof(Name) || d.child_value >= d.child_stride)
             throw std::runtime_error(
                 localizer.Text("error.layout_unsupported", "Unsupported model layout data"));
     }
-    const Json& resource() const { return resource_; }
+    const FunctionContracts& contracts() const { return contracts_; }
+    const ResourceLayout& data_layout() const { return data_layout_; }
     std::size_t Offset(std::string_view key) const {
-        return resource_.at("layout").at(std::string(key)).get<std::size_t>();
+        return resource_.Value(key, 65536);
     }
     template<class T> T Read(Address address) {
         T value{};
@@ -190,6 +220,28 @@ public:
         }
         return field;
     }
+    Property ExpectStruct(Address type, std::string_view name, std::string_view structure) {
+        auto field = PropertyAt(type, name);
+        if (field.type != "StructProperty" || !field.structure ||
+            ObjectName(field.structure) != structure ||
+            Layout<std::int32_t>(field.structure, "ustruct.propertiesSize") != field.size) {
+            const std::array arguments{std::string_view(name)};
+            throw std::runtime_error(localizer.Format("error.property_contract_mismatch",
+                "Property contract mismatch: {0}", arguments));
+        }
+        return field;
+    }
+    Property ExpectMember(const Property& parent, std::string_view name,
+                          std::string_view kind, std::size_t size) {
+        auto field = Expect(parent.structure, name, kind, size);
+        // Only these members are read; unrelated additions may grow the struct.
+        if (field.offset > parent.size || field.size > parent.size - field.offset) {
+            const std::array arguments{std::string_view(name)};
+            throw std::runtime_error(localizer.Format("error.property_layout_invalid",
+                "Property layout is invalid: {0}", arguments));
+        }
+        return field;
+    }
     template<class T> T Value(Address object, Address type, std::string_view name,
                               std::string_view kind) {
         return Read<T>(object + Expect(type, name, kind, sizeof(T)).offset);
@@ -200,7 +252,7 @@ public:
     struct Instance { Address type{}, data{}; };
     Instance Instanced(Address object, Address type, std::string_view name,
                        std::string_view expected) {
-        const auto field = Expect(type, name, "StructProperty", 16, "InstancedStruct");
+        const auto field = Expect(type, name, "StructProperty", data_layout_.instanced_size, "InstancedStruct");
         const auto address = object + field.offset;
         Instance value{Layout<Address>(address, "instancedStruct.scriptStruct"),
                        Layout<Address>(address, "instancedStruct.memory")};
@@ -222,7 +274,7 @@ public:
         auto flags = Layout<Address>(map, "dataTable.rowMapFlagsData");
         if (count < 0 || count > 65536 || capacity < count || capacity > 65536 ||
             free < 0 || free > count || bits < count || bits > 65536 || maximum < bits ||
-            (!flags && bits > 128) || (count && !data))
+            (!flags && static_cast<std::size_t>(bits) > data_layout_.inline_flag_bits) || (count && !data))
             throw std::runtime_error(
                 localizer.Text("error.sparse_table_layout", "Sparse table layout is invalid"));
         if (!flags) flags = map + Offset("dataTable.rowMapInlineFlags");
@@ -270,14 +322,14 @@ public:
     Function& Bind(const std::string& path) {
         if (auto found = functions_.find(path); found != functions_.end() &&
             Resolve(found->second.handle)) return found->second;
-        const auto& spec = resource_.at("functions").at(path);
+        const auto& spec = contracts_.at(path);
         const auto function = Find(path);
         if (!IsA(function, "Function"))
             throw std::runtime_error(
                 localizer.Text("error.not_ufunction", "The target is not a UFunction"));
         Function result;
         result.handle = Pin(function);
-        result.size = spec.at("size").get<std::size_t>();
+        result.size = spec.size;
         const auto count = Layout<std::uint8_t>(function, "ufunction.numParms");
         const auto size = Layout<std::uint16_t>(function, "ufunction.parmsSize");
         const auto ret = Layout<std::uint16_t>(function, "ufunction.returnValueOffset");
@@ -285,14 +337,14 @@ public:
         // Dumper C++ parameter structs include trailing alignment padding.
         // UFunction::ParmsSize may stop at the last reflected parameter instead.
         std::size_t parameter_end{};
-        for (const auto& param : spec.at("fields"))
+        for (const auto& param : spec.fields)
             parameter_end = std::max(parameter_end,
-                param.at("offset").get<std::size_t>() + param.at("size").get<std::size_t>());
+                static_cast<std::size_t>(param.offset) + static_cast<std::size_t>(param.size));
         if (!result.handle.id || result.size > 1024 || parameter_end > result.size ||
             (size != parameter_end && size != result.size) ||
-            count != spec.at("fields").size() || (flags & 0x40u)) {
+            count != spec.fields.size() || (flags & 0x40u)) {
             const std::string params = std::to_string(count);
-            const std::string declared = std::to_string(spec.at("fields").size());
+            const std::string declared = std::to_string(spec.fields.size());
             const std::string parms_size = std::to_string(size);
             const std::string parameter_tail = std::to_string(parameter_end);
             const std::string storage = std::to_string(result.size);
@@ -304,11 +356,11 @@ public:
                 arguments));
         }
         std::uint16_t expected_return = 0xffff;
-        for (const auto& param : spec.at("fields")) {
-            const auto name = param.at("name").get<std::string>();
-            auto field = Expect(function, name, param.at("type").get<std::string>(),
-                                param.at("size").get<std::size_t>());
-            if (field.offset != param.at("offset").get<std::int32_t>() ||
+        for (const auto& param : spec.fields) {
+            const auto name = param.name;
+            auto field = Expect(function, name, param.type,
+                                static_cast<std::size_t>(param.size));
+            if (field.offset != static_cast<std::int32_t>(param.offset) ||
                 field.offset + field.size > size) {
                 const std::array arguments{std::string_view(path), std::string_view(name)};
                 throw std::runtime_error(localizer.Format("error.parameter_offset_mismatch",
@@ -330,11 +382,14 @@ public:
         Parameters(Function& function, const anomaly::sdk::Localizer& l10n)
             : function_(function), localizer(l10n) {}
         template<class T> void Put(std::string_view name, const T& value) {
+            PutBytes(name, &value, sizeof(T));
+        }
+        void PutBytes(std::string_view name, const void* value, std::size_t size) {
             const auto& f = function_.fields.at(std::string(name));
-            if (sizeof(T) != static_cast<std::size_t>(f.size))
+            if (size != static_cast<std::size_t>(f.size))
                 throw std::runtime_error(
                     localizer.Text("error.argument_size_mismatch", "Argument type size mismatch"));
-            std::memcpy(data.data() + f.offset, &value, sizeof(T));
+            std::memcpy(data.data() + f.offset, value, size);
         }
         template<class T> T Get(std::string_view name) const {
             const auto& f = function_.fields.at(std::string(name));
@@ -390,7 +445,9 @@ private:
         return Layout<Address>(slot, "objects.objectOffset");
     }
     Process& process_;
-    Json resource_;
+    anomaly::sdk::Profile resource_;
+    FunctionContracts contracts_;
+    ResourceLayout data_layout_;
     Address registry_{};
     std::map<std::string, Function, std::less<>> functions_;
     const anomaly::sdk::Localizer& localizer;

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "id": "anomaly.builtin.nte.deserted",
+  "id": "wawmew.deserted",
   "name": "Deserted",
   "description": "Deserted: once enabled, crowd and vehicle spawning stops, without affecting the stationary NPCs.",
   "author": "WawMew",
@@ -62,6 +62,14 @@
       "id": "anomaly.scheduler",
       "minVersion": 1,
       "optional": true
+    },
+    {
+      "id": "anomaly.profile",
+      "minVersion": 1
+    },
+    {
+      "id": "anomaly.json",
+      "minVersion": 1
     }
   ],
   "capabilities": [
@@ -73,6 +81,7 @@
     "ue5-objects",
     "input",
     "storage",
-    "scheduler"
+    "scheduler",
+    "json"
   ]
 }

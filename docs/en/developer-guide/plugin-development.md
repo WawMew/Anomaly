@@ -13,6 +13,8 @@ Anomaly\plugins\MyPlugin\
   manifest.json     declares ID, version, API range, dependencies, required services and capabilities
   plugin.dll        exports AnomalyPluginEntryV1
   assets\           (optional) assets
+  locales\          (optional) localization catalogs
+  profile\          (optional) signatures, layouts and compatibility data
   dependency.dll    (optional) native dependency
 ```
 
@@ -40,7 +42,25 @@ anomaly_add_plugin(my_plugin
   PACKAGE_NAME MyPlugin)
 ```
 
-`anomaly_add_plugin` always outputs `plugin.dll`, places the manifest and the `locales` directory next to the manifest into the package directory, and owns the install rule for that package: by default it installs to `<prefix>/Anomaly/plugins/<PACKAGE_NAME>` (the `GameRuntime` component). Two optional keywords change the install behavior: `NO_RELEASE` only builds and produces no install rule; `TEST_PLUGIN` installs into a separate `TestPlugins` component and only builds and installs when `ANOMALY_BUILD_TEST_PLUGINS=ON`. Any extra assets of your own (for example `data\`) still have to be listed explicitly in the project.
+`anomaly_add_plugin` always outputs `plugin.dll`, copies the manifest and its sibling `locales/`, `assets/` and `profile/` directories into the package, and owns the install rule for that package: by default it installs to `<prefix>/Anomaly/plugins/<PACKAGE_NAME>` (the `GameRuntime` component). Two optional keywords change the install behavior: `NO_RELEASE` only builds and produces no install rule; `TEST_PLUGIN` installs into a separate `TestPlugins` component and only builds and installs when `ANOMALY_BUILD_TEST_PLUGINS=ON`. Any extra assets of your own (for example `data\`) still have to be listed explicitly in the project.
+
+`profile/` is shared by all plugins and automatically copied and installed by CMake. Prefer one JSON file for related features, organized by `symbols` and compatibility `candidates`. Every file must follow [`plugin-profile.schema.json`](../../../schemas/plugin-profile.schema.json). Store signatures, entry bytes, call offsets, layout seeds and version differences there, rather than hardcoding compatibility data in C++. Keep calling conventions, semantic contracts and necessary layout checks in code.
+
+Declare `anomaly.profile` and `anomaly.json` v1 plus the `json` capability in the manifest. Call `anomaly::sdk::LoadProfile(host, "my-plugin.profile.json")` during startup. The host reads `profile/` from the current DLL generation's package snapshot and validates paths and the shared schema. Plugins must not open or parse profile files themselves. The returned C++ `Profile` is an owned snapshot; temporary JSON handles have been released. Load only in Lifecycle/Worker, then read the snapshot in later callbacks. Omit the `profile/` prefix from the filename.
+
+```cpp
+#include <anomaly/sdk/profile.hpp>
+
+const auto loaded = anomaly::sdk::LoadProfile(host, "my-plugin.profile.json");
+if (!loaded) { /* Report loaded.error(); disable the feature. */ return; }
+const auto& profile = loaded.value();
+if (profile.contract != "my-plugin-v1") return;
+// Validate required layout/values against the implementation before installing hooks.
+const auto symbol = anomaly::sdk::ResolveProfileSymbol(signature, core, profile, "query");
+if (!symbol) { /* Report symbol.error; disable the feature. */ return; }
+```
+
+The shared resolver validates a unique candidate, optional E8 relative call and exact entry bytes. Ambiguous matches and changed entries are rejected. `contract` identifies semantic support, never Build identity. Configure again after adding the directory, then rebuild. Changes take effect in a new package generation; never write back to profiles. See the [profile service](../api-reference/platform-services.md#anomalyprofile) for the C ABI and fields, and [`SummonLab/profile/compatibility.profile.json`](../../../plugins/SummonLab/profile/compatibility.profile.json) for a combined example.
 
 Source entry points: `<anomaly/sdk/anomaly_sdk.h>` (C) or `<anomaly/sdk/cpp.hpp>` (C++, which provides lightweight wrappers such as `Host`, `ServiceRef` and `UiWindow`).
 
@@ -79,10 +99,11 @@ ANOMALY_SDK_EXPORT AnomalyStatusV1 ANOMALY_CALL AnomalyPluginEntryV1(
         return {ANOMALY_STATUS_V1_INVALID_ARGUMENT, 0, {}};
     *descriptor = {
         sizeof(*descriptor), ANOMALY_PLUGIN_API_V1_MAJOR, ANOMALY_PLUGIN_API_V1_MINOR,
-        anomaly::sdk::StringView("anomaly.example.my-plugin"),
+        anomaly::sdk::StringView("example.my-plugin"),
         anomaly::sdk::StringView("My Plugin"),
         anomaly::sdk::StringView("Me"), anomaly::sdk::StringView("1.0.0"),
-        Load, Start, Stop, Unload, /*on_update*/ nullptr, Draw};
+        Load, Start, Stop, Unload, /*on_update*/ nullptr, Draw,
+        /*on_overlay*/ nullptr};
     return anomaly::sdk::Ok();
 }
 ```
@@ -95,10 +116,11 @@ The lifecycle callbacks and their thread affinity:
 | `on_start` | Activation | Lifecycle |
 | `on_update(delta)` | Logic update per tick | Game |
 | `on_draw(ui)` | Drawing each frame | Render |
+| `on_overlay(ui)` | Persistent overlay drawing on every render frame, even when the catalog window is closed | Render |
 | `on_stop(deadline)` | Stop, commit state | Lifecycle |
 | `on_unload` | Cleanup before unloading | Lifecycle |
 
-Render callbacks must stay a pure drawing path. Game-semantic service queries, cursor advancement, paging, name resolution and statistics belong in the Game domain `on_update`, converted into the plugin's own immutable display snapshot; `on_draw` only copies the snapshot under a short lock and calls the UI outside the lock. [`nte_combat_demo`](../../../examples/nte_combat_demo/plugin.cpp) demonstrates that boundary: it resolves sources and participants only when new damage arrives, and idle frames do not call NTE services repeatedly.
+Render callbacks must stay a pure drawing path. Game-semantic service queries, cursor advancement, paging, name resolution and statistics belong in the Game domain `on_update`, converted into the plugin's own immutable display snapshot; `on_draw` and `on_overlay` only copy the snapshot under a short lock and call the UI outside the lock. Use `on_overlay` for persistent world markers and `on_draw` for the regular plugin window. [`nte_combat_demo`](../../../examples/nte_combat_demo/plugin.cpp) demonstrates that boundary: it resolves sources and participants only when new damage arrives, and idle frames do not call NTE services repeatedly.
 
 See [Lifecycle and core services](../api-reference/lifecycle-and-core.md) for the complete entry / descriptor definitions.
 
@@ -124,7 +146,7 @@ Every plugin must have a `manifest.json`. Example:
 ```json
 {
   "schemaVersion": 2,
-  "id": "anomaly.example.my-plugin",
+  "id": "example.my-plugin",
   "name": "My Plugin",
   "description": "Shows current player and session diagnostics.",
   "author": "Me",
@@ -145,7 +167,7 @@ Every plugin must have a `manifest.json`. Example:
 
 See [Manifest and capabilities](../api-reference/manifest-and-capabilities.md) and [`schemas/plugin-manifest.schema.json`](../../../schemas/plugin-manifest.schema.json) for the complete field definitions.
 
-- `id` is the normalized ID (dot-separated lowercase).
+- `id` is the plugin ID: `<author>.<plugin>`, exactly two lowercase kebab labels. The first segment is the author namespace, written the way the author signs it (`CCYellowStar` becomes `ccyellowstar`); the second is the plugin name. There is no third segment, and `local` / `builtin` / `plugin` prefixes and reverse-domain forms are rejected by manifest validation.
 - `description` is the plugin blurb used in the "About" area of the management UI; a plugin can supply translations through `plugin.description` in its localization directory.
 - `builds` is the build compatibility declaration, and it accepts either `nte-*` or an exact fingerprint. The current production Runtime does not compute fingerprints and does not use this field to block plugins on load, so it is not a runtime safety check.
 - `license` is a single SPDX identifier (required for public distribution).
@@ -259,23 +281,23 @@ The original signature matching multiple times still returns `CONFLICT`, and ins
 The raw signature interface only provides addresses and has no layout validator or field update contract, so it only wildcards RIP-relative addresses and relative branch operands, keeping object member and stack displacement bytes; wildcards already present in the original pattern still follow the original declaration. When the learning window matches nothing, the framework also tries to re-derive from the complete instructions of the original pattern, so no hand-written fallback pattern is needed.
 Compile-time field offset constants in existing DLLs cannot be replaced by signature recovery; layout changes outside the window or not constrained by the original signature cannot be validated by the address resolution interface either. Plugins that bypass the service and scan on their own do not go through this recovery path.
 
-Plugins that need automatic field offset learning can opt into signature v2 and include `anomaly/sdk/signature.hpp`. Set `minVersion` to `2` for that service in the manifest. Signatures and semantic seeds still live in the plugin's own header; call the framework API once during startup, and later callbacks only read the local snapshot. For example, with an existing `kPausePattern` / `kResumePattern`:
+Plugins that need automatic field offset learning can opt into signature v2 and include `anomaly/sdk/signature.hpp`. Set `minVersion` to `2` for that service in the manifest. Load signatures and offset seeds from the shared profile described above; call the framework API once during startup, and later callbacks only read the local snapshot. For example, after validating a `profile` with single-candidate `pause` / `resume` symbols:
 
 ```cpp
-inline constexpr AnomalySignatureFieldV2 fields[]{
-    anomaly::sdk::FieldSeed("PlayingID", 0x438, 4),
-    anomaly::sdk::FieldSeed("Paused", 0x43C),
+const AnomalySignatureFieldV2 fields[]{
+    anomaly::sdk::FieldSeed("PlayingID", profile.layout.at("PlayingID"), 4),
+    anomaly::sdk::FieldSeed("Paused", profile.layout.at("Paused")),
 };
 inline constexpr AnomalySignatureMemberV2 members[]{
     anomaly::sdk::MemberUse(0, 4, ANOMALY_SIGNATURE_MEMBER_READ_V2),
     anomaly::sdk::MemberUse(1, 1, ANOMALY_SIGNATURE_MEMBER_WRITE_V2),
 };
-inline constexpr AnomalySignatureWitnessV2 witnesses[]{
-    anomaly::sdk::Witness("pause", kPausePattern, members),
-    anomaly::sdk::Witness("resume", kResumePattern, members),
+const AnomalySignatureWitnessV2 witnesses[]{
+    anomaly::sdk::Witness("pause", profile.symbol("pause").candidates.front().pattern, members),
+    anomaly::sdk::Witness("resume", profile.symbol("resume").candidates.front().pattern, members),
 };
-inline constexpr anomaly::sdk::LayoutSchema schema{
-    "HTGame.exe", ".text", fields, witnesses};
+const anomaly::sdk::LayoutSchema schema{
+    profile.module, profile.section, fields, witnesses};
 
 // Lifecycle / Worker; signature is the AnomalySignatureServiceV2 you already queried.
 auto resolved = anomaly::sdk::ResolveLayout(signature, schema);
@@ -310,7 +332,7 @@ cmake -S . -B build -DAnomalySDK_DIR=C:\AnomalySDK\lib\cmake\AnomalySDK
 cmake --build build --config Debug
 anomaly-plugin validate build\package\MyPlugin
 anomaly-plugin pack build\package\MyPlugin --output .\dist
-anomaly-test-host --plugin .\dist\anomaly.example.my-plugin --reload 10 --ticks 60
+anomaly-test-host --plugin .\dist\example.my-plugin --reload 10 --ticks 60
 ```
 
 `anomaly-test-host` is an offline **game-free** fixture: it loads your package, runs a number of ticks and reloads, and verifies lifecycle and degraded behavior. That environment has no real game adapter, so NTE services stay `UNAVAILABLE`, but the plugin package itself must still load and unload cleanly.
