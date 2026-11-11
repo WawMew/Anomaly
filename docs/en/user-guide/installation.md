@@ -1,6 +1,6 @@
 # Installation and updates
 
-Regular users do not need to build from source. Download the Runtime ZIP, extract it completely, then run the launcher. For a first install, use "Proxy install"; "Live attach" suits temporary scenarios where you do not want proxy files in the game directory.
+Regular users do not need to build from source. Download the Runtime ZIP, extract it completely, then run the launcher. For a first install, use "Launch → Proxy mode"; "Injection mode" suits temporary scenarios where you do not want proxy files in the game directory.
 
 > [!CAUTION]
 > Anomaly enters the game process and reads or modifies runtime state. Read the disclaimer in the root [README](../../../README.en.md) before use.
@@ -39,7 +39,7 @@ When you build from source, the equivalent directory is `.build\windows-vs2022\g
 
 1. Exit the game first. When updating an older version, also close any `AnomalyLauncher.exe` still running.
 2. Run the `AnomalyLauncher.exe` you just extracted. A UAC prompt is normal — the launcher needs administrator rights to write into the game directory.
-3. Stay on the **Proxy install** page at the top.
+3. Open the **Launch** tab at the top and select **Proxy mode**.
 4. Check "Game directory". If the auto-detected path is wrong, click the folder button and pick **the folder that directly contains `HTGame.exe`**, not the game installation root.
 5. Once the status shows "Not installed", click **Install**. Wait until the status becomes "Enabled" before you close the launcher.
 6. Start the game as usual, and press `Insert` after entering to bring up the Anomaly interface.
@@ -71,6 +71,49 @@ The structured logs under `Anomaly\logs\` roll over by size, and old log files a
 
 If pressing `Insert` does nothing, first check whether these two files were created, then continue with [Troubleshooting](troubleshooting.md).
 
+## Automatic update check
+
+The launcher looks for a newer release on GitHub by itself, so there is no ZIP to hunt down:
+
+1. Start `AnomalyLauncher.exe`. It reads this repository's newest GitHub release and compares it with the version this build carries. Once an endpoint has answered, the launcher remembers which one it was (in `AnomalyLauncher.json`, `update.endpoint`) and asks that one first next time instead of waiting out an address this network cannot reach.
+2. When a newer release exists, the launcher opens a dialog: the current version above, that release's **notes** in the middle, and **Skip this version** at the lower left with **Update to x.y.z** at the lower right.
+3. Nothing happens until **Update to x.y.z** is pressed. It downloads that release's `Anomaly-<version>-runtime.zip` (the dialog shows a progress bar -- received of total, percentage, elapsed -- with **Cancel** beside it), extracts it over this folder and restarts the launcher on the new build. **Skip this version** stops the dialog for that one release (it is stored in `AnomalyLauncher.json`, so a restart does not ask again); **Settings → Updates** still installs it when asked. Cancelling a download is not a failure: the release stays offered.
+
+After a skipped or dismissed prompt the mode band (the Launch / Mods / Settings row) shows "Version x.y.z is available"; clicking it opens the same dialog again.
+
+**Settings → Updates** checks by hand at any time; if GitHub answers with its rate limit (HTTP 403), the page says so and offers the release page.
+
+### Mirrors and verification
+
+The **update check** -- reading the release -- asks GitHub directly first and falls back to the gh-proxy mirrors:
+
+```text
+https://v4.gh-proxy.org/<original url>
+https://gh-proxy.org/<original url>
+https://v6.gh-proxy.org/<original url>
+https://cdn.gh-proxy.org/<original url>
+https://axisnow.gh-proxy.org/<original url>
+```
+
+The **package itself does not go through them**: it is downloaded from the `github.com` address the release publishes, and only extracted after its length and **SHA-256** (GitHub's asset digest) match. The verified size and digest are written to `Anomaly\logs\launcher-update.log`.
+
+Automatic updates accept only this repository's Runtime package for the selected version. Packages without a size or valid SHA-256 must be downloaded manually from the release page.
+
+When the network cannot reach `github.com` at all, the dialog also offers **Quark drive** and **Baidu Netdisk** buttons pointing at the same release (Quark `https://pan.quark.cn/s/81a25f50de52?pwd=gGdV`, Baidu `https://pan.baidu.com/s/1x5PpiYT8GM2z0_axmcAJ9w?pwd=hfs5`); extract that Runtime ZIP by hand as described in [Updating to a new version](#updating-to-a-new-version).
+
+An update replaces the files the package ships and keeps the ones you own:
+
+- `AnomalyLauncher.json` (the launcher's own settings);
+- `Anomaly\anomaly.ini`, `repository.json`, `plugin-repositories.json`;
+- `Anomaly\config\`, `state\`, `logs\`, `crashes\`.
+
+The old image is renamed to `AnomalyLauncher.exe.old-<id>` first. The new process waits for the old process to save its settings and exit before reading configuration and removing the old image.
+
+Turn **Check for updates automatically** off to keep the launcher off the network.
+
+> [!NOTE]
+> The update applies to this extracted folder only. A `dwmapi.dll` and `Anomaly\` already installed into the game directory are not replaced with it; use **Launch → Proxy mode → Update** for those.
+
 ## Updating to a new version
 
 Do not extract the new ZIP over the old extracted folder. Extract the new Runtime completely into a new folder, then:
@@ -93,7 +136,7 @@ The Core, Profiles, and built-in plugins shipped with the new version are replac
 
 ## Temporarily disabling the proxy
 
-Click **Disable** on the **Proxy install** page and the launcher renames:
+Click **Disable** on the **Launch → Proxy mode** page and the launcher renames:
 
 ```text
 dwmapi.dll
@@ -106,6 +149,10 @@ dwmapi.dll.disabled
 ```
 
 Click **Enable** when you want it back. This only affects the **next** start; it does not unload a Runtime that has already entered the current game process. Exiting the game before switching is recommended.
+
+## Uninstall
+
+Exit the game, open **Launch → Proxy mode**, click **Uninstall**, then review the directory and deletion scope in the dialog and confirm. This deletes `dwmapi.dll` (or `dwmapi.dll.disabled`) and the entire `Anomaly\` directory in the game folder, including settings, plugins and runtime data. Use **Disable** to stop loading Anomaly temporarily.
 
 ## Manual copy without the launcher
 
@@ -123,7 +170,7 @@ If the target directory already has a `dwmapi.dll`, first establish who it belon
 To use it:
 
 1. Keep the entire runtime package structure intact.
-2. Run `AnomalyLauncher.exe` and switch to **Live attach**.
+2. Run `AnomalyLauncher.exe` and switch to **Launch → Injection mode**.
 3. If the official launcher was not detected automatically, select `NTELauncher.exe` manually.
 4. Click **Start and attach** to take over this start; if the game is already running, click **Inject into running process**, then continue playing through the official launcher's normal flow (or the existing window).
 
@@ -137,7 +184,7 @@ If the game restricts process handles from the moment it is created, live attach
 
 Anomaly and RE-UE4SS both use `dwmapi.dll` in the game directory, so the two cannot sit there at the same time. When the launcher encounters an unrecognized `dwmapi.dll`, it shows "Conflict" and does not overwrite it. If `dwmapi.dll` and `dwmapi.dll.disabled` both exist, that is treated as a conflict as well.
 
-The launcher has no uninstall button at the moment. To remove Anomaly completely:
+Use **Launch → Proxy mode → Uninstall** and confirm in the dialog to remove the proxy and the entire game-local `Anomaly\` directory. In case of a conflict, or to remove the files manually:
 
 1. Exit the game and the launcher.
 2. Delete the Anomaly proxy in the game directory: `dwmapi.dll` or `dwmapi.dll.disabled`. Delete only the one you have confirmed was installed by Anomaly, and do not remove same-named files that belong to other tools.
