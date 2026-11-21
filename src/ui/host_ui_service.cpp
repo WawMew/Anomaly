@@ -742,9 +742,16 @@ int ANOMALY_CALL Checkbox(void*, AnomalyStringViewV1 label, int* value) {
     if (value == nullptr) return 0;
     const std::string text = Copy(label);
     bool checked = *value != 0;
-    // Every boolean the plugin ABI exposes is a switch, so plugin pages match
-    // the shell without a new entry point.
     const bool changed = glass::Switch(text.c_str(), &checked);
+    *value = checked ? 1 : 0;
+    return changed ? 1 : 0;
+}
+
+int ANOMALY_CALL CheckboxSquare(void*, AnomalyStringViewV1 label, int* value) {
+    if (value == nullptr) return 0;
+    const std::string text = Copy(label);
+    bool checked = *value != 0;
+    const bool changed = ImGui::Checkbox(text.c_str(), &checked);
     *value = checked ? 1 : 0;
     return changed ? 1 : 0;
 }
@@ -921,12 +928,18 @@ void ANOMALY_CALL CloseCurrentPopup(void*) { ImGui::CloseCurrentPopup(); }
 
 int ANOMALY_CALL FilterMatch(
     void*, AnomalyStringViewV1 filter, AnomalyStringViewV1 value) {
-    const std::string needle = Copy(filter);
-    const std::string haystack = Copy(value);
+    std::string needle = Copy(filter);
+    const std::string_view haystack = value.data == nullptr
+        ? std::string_view{} : std::string_view(value.data, value.size);
     if (needle.empty()) return 1;
+    // Fold the query once; a catalog search compares it against every byte of
+    // each path. Keep the same locale-aware byte matching without copying paths.
+    for (char& byte : needle) {
+        byte = static_cast<char>(std::tolower(static_cast<unsigned char>(byte)));
+    }
     const auto equal_folded = [](const char left, const char right) {
         return std::tolower(static_cast<unsigned char>(left)) ==
-            std::tolower(static_cast<unsigned char>(right));
+            static_cast<unsigned char>(right);
     };
     const auto found = std::search(
         haystack.begin(), haystack.end(), needle.begin(), needle.end(), equal_folded);
@@ -1432,7 +1445,7 @@ const AnomalyUiServiceV1 kUiService{
     TextWrapped, BeginChildAutoFitY, SliderFloatEnabled, SetNextItemWidth,
     OverlayViewportSize, OverlayGlass, OverlayRectFilled, OverlayLine, OverlayCircle,
     OverlayRingSector, OverlayMeasureText, OverlayText, OverlayGlassRingSector,
-    DrawScreenPrimitives};
+    DrawScreenPrimitives, CheckboxSquare};
 
 }  // namespace
 

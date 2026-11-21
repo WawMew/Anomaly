@@ -20,8 +20,12 @@ using namespace anomaly::sdk;
 using Reload = mod_manager::WorldReload;
 using Visual = mod_manager::VisualReload;
 
+constexpr std::string_view kSettingsId = "anomaly.mod-manager.settings";
+constexpr std::string_view kSettingsSchema = R"({"type":"object","properties":{"groupByFolder":{"type":"boolean"}},"required":["groupByFolder"],"additionalProperties":false})";
+constexpr std::uint32_t kSettingsVersion = 1;
+
 struct Row {
-    std::string key, name;
+    std::string key, name, parent_folder;
     std::vector<std::string> groups;  // the categories the mod replaces, one section per set of them
     std::string skins;                // the variants inside those categories, shown on the mod's row
     bool enabled{}, disabled{}, complete{};
@@ -30,7 +34,7 @@ struct Row {
 struct RowCollection { std::vector<Row> values; bool failed{}; };
 struct AssetCollection { std::set<std::string> values; bool failed{}; };
 enum class Kind { Toggle, ReloadWorld };
-struct Action { Kind kind; std::string key; bool enabled{}; };
+struct Action { Kind kind; std::vector<std::string> keys; bool enabled{}; };
 struct Prepared { bool reload_world{}; std::vector<std::string> packages; };
 
 struct Context {
@@ -39,21 +43,24 @@ struct Context {
     const AnomalyModsServiceV1* mods{};
     const AnomalySchedulerServiceV1* scheduler{};
     const AnomalyWindowServiceV1* windows{};
+    const AnomalyConfigServiceV1* config{};
     AnomalyGenerationHandleV1 task{}, window{};
     std::mutex mutex;
     bool stopping{true}, busy{}, compatibility{}, profile_valid{}, services_ready{}, visual_ready{}, catalog_seen{};
+    bool settings_ready{}, group_by_folder{}, saved_group_by_folder{}, settings_save_failed{};
     const AnomalyNteSessionServiceV1* session{};
     std::set<std::string> pending_visual;
     std::map<std::string, std::set<std::string>> visual_index;
     std::vector<Row> rows;
     std::optional<Action> action;
     std::optional<Prepared> prepared;
-    std::string status;
+    std::string status, save_error;
     // The Chinese names of the categories, keyed by the container identifier they classify. The
     // table is read once at load, so the panel never touches the file system while drawing.
     std::map<std::string, std::string, std::less<>> category_names;
-    // The search box. Only the draw callback reads and writes it, so it needs no lock.
+    // Only the draw callback owns the search and batch selection.
     std::string filter;
+    std::set<std::string> selected_keys;
     mod_manager::NativeAccess native;
     Reload reload;
     Visual visual;
@@ -61,6 +68,52 @@ struct Context {
 
 std::string Copy(AnomalyStringViewV1 value) { return value.data ? std::string(value.data, value.size) : std::string{}; }
 std::string ErrorText(AnomalyStatusV1 value) { return value.message.size ? Copy(value.message) : std::to_string(value.code); }
+
+AnomalyByteSpanV1 Bytes(const std::string_view text) {
+    return {reinterpret_cast<const std::uint8_t*>(text.data()), text.size()};
+}
+
+bool LoadSettings() {
+    AnomalyGenerationHandleV1 schema{};
+    const auto id = StringView(kSettingsId);
+    if (g.config->register_schema(g.config->user, id, kSettingsVersion, Bytes(kSettingsSchema), &schema).code)
+        return false;
+    std::array<std::uint8_t, 128> buffer{};
+    auto size = buffer.size();
+    std::uint32_t version{};
+    const auto status = g.config->read(g.config->user, id, &version, {buffer.data(), buffer.size()}, &size);
+    if (status.code == ANOMALY_STATUS_V1_NOT_FOUND) return true;
+    if (status.code || version != kSettingsVersion || size > buffer.size()) return false;
+    const auto settings = nlohmann::json::parse(buffer.begin(), buffer.begin() + size, nullptr, false);
+    const auto group = settings.find("groupByFolder");
+    if (group == settings.end() || !group->is_boolean()) return false;
+    g.saved_group_by_folder = g.group_by_folder = group->get<bool>();
+    return true;
+}
+
+bool SaveSettings() {
+    bool by_folder;
+    {
+        std::scoped_lock lock(g.mutex);
+        by_folder = g.group_by_folder;
+        if (by_folder == g.saved_group_by_folder) return true;
+    }
+    const auto document = by_folder ? R"({"groupByFolder":true})" : R"({"groupByFolder":false})";
+    const bool saved = g.config->write_atomic(g.config->user, StringView(kSettingsId),
+        kSettingsVersion, Bytes(document)).code == ANOMALY_STATUS_V1_OK;
+    std::scoped_lock lock(g.mutex);
+    if (saved) g.saved_group_by_folder = by_folder;
+    g.settings_save_failed = !saved && g.group_by_folder != g.saved_group_by_folder;
+    return saved;
+}
+
+std::string ParentFolder(const AnomalyModEntryV1& entry, std::string_view key) {
+    if (entry.struct_size >= offsetof(AnomalyModEntryV1, parent_folder) + sizeof(entry.parent_folder))
+        return Copy(entry.parent_folder);
+    if (key.ends_with('/')) key.remove_suffix(1);
+    const auto slash = key.rfind('/');
+    return slash == std::string_view::npos ? std::string{} : std::string(key.substr(0, slash));
+}
 // The ABI carries the classification as `group/skin` tokens separated by ", ". The panel names the
 // group in the section header and the variants on the mod's own row, so two outfits of one character
 // stay one section instead of becoming a section of their own. Content directories are the only
@@ -101,6 +154,14 @@ void LocalizedStatus(std::string_view key, std::string_view fallback, std::strin
     auto text = detail.empty() ? g.localizer.Text(key, fallback) : g.localizer.Format(key, fallback, args);
     std::scoped_lock lock(g.mutex); g.status = std::move(text);
 }
+void ReportMountFailure(AnomalyStatusV1 status) {
+    if (status.message.size) {
+        LocalizedStatus("status.mount_pending", "Could not apply all selected mods: {0}", Copy(status.message));
+    } else {
+        LocalizedStatus("status.mount_no_detail",
+            "Could not apply all selected mods. Check the runtime log for details.");
+    }
+}
 int ANOMALY_CALL Collect(void* user, const AnomalyModEntryV1* entry) noexcept {
     auto& result = *static_cast<RowCollection*>(user);
     try {
@@ -110,7 +171,9 @@ int ANOMALY_CALL Collect(void* user, const AnomalyModEntryV1* entry) noexcept {
         const auto groups = Copy(entry->struct_size >= offsetof(AnomalyModEntryV1, resource_groups) + sizeof(entry->resource_groups)
             ? entry->resource_groups : entry->vehicles);
         const auto classification = SplitGroups(groups);
-        result.values.push_back({Copy(entry->key), Copy(entry->name),
+        auto key = Copy(entry->key);
+        auto folder = ParentFolder(*entry, key);
+        result.values.push_back({std::move(key), Copy(entry->name), std::move(folder),
             classification.first, classification.second,
             entry->enabled != 0, entry->disabled_files != 0, entry->index_complete != 0});
         return 1;
@@ -194,6 +257,7 @@ void ANOMALY_CALL Worker(void*, AnomalyGenerationHandleV1) noexcept {
             busy = g.busy; visual_ready = g.visual_ready; compatibility = g.compatibility;
             previous = g.rows;
         }
+        SaveSettings();
         if (g.native.ReflectionAvailable() && !services_ready && !binding_pending) {
             const Host host(g.api);
             const auto session = host.Query<AnomalyNteSessionServiceV1>(ANOMALY_NTE_SESSION_SERVICE_V1_ID).get();
@@ -205,15 +269,29 @@ void ANOMALY_CALL Worker(void*, AnomalyGenerationHandleV1) noexcept {
 
         bool ok = true, synchronized = false;
         if (action && action->kind == Kind::Toggle) {
-            const auto saved = compatibility ? AnomalyStatusV1{ANOMALY_STATUS_V1_CONFLICT}
-                : g.mods->set_enabled(g.mods->user, StringView(action->key), action->enabled);
-            ok = saved.code == 0;
+            ok = false;
+            std::string save_error;
+            for (const auto& key : action->keys) {
+                const auto saved = g.mods->set_enabled(g.mods->user, StringView(key), action->enabled);
+                if (!saved.code) ok = true;
+                else if (save_error.empty()) {
+                    const auto detail = ErrorText(saved);
+                    const std::array<std::string_view, 2> args{key, detail};
+                    save_error = g.localizer.Format("status.save_failed", "Could not save {0}: {1}", args);
+                }
+            }
+            const bool all_saved = save_error.empty();
+            if (!all_saved) {
+                std::scoped_lock lock(g.mutex);
+                g.save_error = std::move(save_error);
+                g.status.clear();
+            }
             if (ok) {
                 const auto mounted = g.mods->synchronize(g.mods->user);
                 synchronized = mounted.code == 0; ok = synchronized;
-                if (ok) LocalizedStatus("status.saved", "Applied");
-                else LocalizedStatus("status.mount_pending", "Container switch failed: {0}", ErrorText(mounted));
-            } else LocalizedStatus("status.save_failed", "Save failed: {0}", ErrorText(saved));
+                if (!ok) ReportMountFailure(mounted);
+                else if (all_saved) LocalizedStatus("status.saved", "Applied");
+            }
         }
 
         RowCollection collection;
@@ -266,7 +344,7 @@ void ANOMALY_CALL Worker(void*, AnomalyGenerationHandleV1) noexcept {
                 if (!mounted.code) {
                     prepared = Prepared{true, {}};
                     g.pending_visual.clear();
-                } else LocalizedStatus("status.mount_pending", "Container switch failed: {0}", ErrorText(mounted));
+                } else ReportMountFailure(mounted);
             } else LocalizedStatus("status.reload_unavailable", "World reload unavailable");
         }
 
@@ -281,7 +359,7 @@ void ANOMALY_CALL Worker(void*, AnomalyGenerationHandleV1) noexcept {
                 Prepared value;
                 value.packages.assign(g.pending_visual.begin(), g.pending_visual.end());
                 prepared = std::move(value);
-            } else if (mounted.code) LocalizedStatus("status.mount_pending", "Container switch failed: {0}", ErrorText(mounted));
+            } else if (mounted.code) ReportMountFailure(mounted);
             else LocalizedStatus("status.visual_unavailable", "Local refresh unavailable; reload world");
             g.pending_visual.clear();
         }
@@ -303,6 +381,7 @@ void Request(Action action) {
     std::scoped_lock lock(g.mutex);
     if (g.stopping || g.busy || g.compatibility) return;
     g.action = std::move(action); g.busy = true;
+    g.save_error.clear();
     g.status = g.localizer.Text("status.queued", "Queued");
 }
 void ReportReload(Reload::Result result) {
@@ -408,7 +487,7 @@ std::string JoinNames(const std::vector<std::string>& values) {
 // category it replaces under both the identifier and the name it is shown as. Searching both is what
 // makes a Chinese input and an English one find the same row.
 std::string SearchText(const Row& row, const std::vector<std::string>& labels) {
-    std::string text = row.name + " " + row.key + " " + row.skins;
+    std::string text = row.name + " " + row.key + " " + row.parent_folder + " " + row.skins;
     for (std::size_t index = 0; index < row.groups.size(); ++index)
         text += " " + row.groups[index] + " " + labels[index];
     return text;
@@ -437,12 +516,15 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) noexcept {
         struct End { ~End() { g.windows->end(g.windows->user, g.window); } } end;
         if (!visible) return;
         std::vector<Row> rows;
-        std::string status;
-        bool busy{}, services_ready{};
+        std::string status, save_error;
+        bool busy{}, services_ready{}, by_folder{}, settings_save_failed{};
         {
             std::unique_lock lock(g.mutex, std::try_to_lock);
             if (!lock) return;
             rows = g.rows; status = g.status; busy = g.busy; services_ready = g.services_ready;
+            save_error = g.save_error;
+            by_folder = g.group_by_folder;
+            settings_save_failed = g.settings_save_failed;
         }
         const auto TextLocalized = [&](std::string_view key, std::string_view fallback) {
             ui->text(ui->user, StringView(g.localizer.Text(key, fallback)));
@@ -453,9 +535,31 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) noexcept {
             TextLocalized("status.profile_unavailable", "Profile mismatch; refresh unavailable");
         else if (!g.compatibility && !services_ready)
             TextLocalized("status.services_pending", "Waiting for game services.");
-        if (!status.empty()) ui->text(ui->user, StringView(status));
+        const auto draw_status = [&](const std::string& message) {
+            if (message.empty()) return;
+            if (UiFieldAvailable(ui, offsetof(AnomalyUiServiceV1, text_wrapped), sizeof(ui->text_wrapped)) &&
+                ui->text_wrapped) ui->text_wrapped(ui->user, StringView(message));
+            else ui->text(ui->user, StringView(message));
+        };
+        draw_status(status);
+        draw_status(save_error);
         if (ui->button_enabled(ui->user, StringView(g.localizer.Text("action.reload_world", "Reload world")), 0, 0, !busy && !g.compatibility && services_ready))
             Request({Kind::ReloadWorld, {}});
+
+        if (g.settings_ready) {
+            int checked = by_folder;
+            if (ui->checkbox(ui->user, StringView(g.localizer.Text("view.group_by_folder", "Group by folder")), &checked)) {
+                std::scoped_lock lock(g.mutex);
+                if (!g.stopping) {
+                    by_folder = g.group_by_folder = checked != 0;
+                    g.settings_save_failed = settings_save_failed = false;
+                }
+            }
+        } else TextLocalized("status.view_load_failed", "Could not load the grouping preference.");
+        if (settings_save_failed) TextLocalized("status.view_save_failed", "Could not save the grouping preference.");
+        if (by_folder) std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+            return std::tie(a.parent_folder, a.name, a.key) < std::tie(b.parent_folder, b.name, b.key);
+        });
 
         // The search box filters which rows the page lists; the whole set is drawn otherwise, so a
         // list of a couple of dozen mods needs no pager.
@@ -470,10 +574,44 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) noexcept {
         }
         const bool host_filter = UiFieldAvailable(ui, offsetof(AnomalyUiServiceV1, filter_match),
             sizeof(decltype(AnomalyUiServiceV1::filter_match))) && ui->filter_match;
-        // Only the list scrolls. The mode, the status, the reload button and the search box are drawn
-        // above it and keep their place; the rows take the rest of the window inside their own scroll
-        // region, which a width and height of zero fill. A window too short for the header leaves
-        // nothing to fill, and the body scrolls the page as the only way to reach the controls.
+        const bool has_rows = !rows.empty();
+        if (!g.filter.empty()) {
+            std::erase_if(rows, [&](const Row& row) {
+                const auto search = SearchText(row, CategoryLabels(row));
+                return host_filter
+                    ? ui->filter_match(ui->user, StringView(g.filter), StringView(search)) == 0
+                    : !ContainsFolded(search, g.filter);
+            });
+        }
+
+        const bool select_all = rows.empty() || std::any_of(rows.begin(), rows.end(), [](const Row& row) {
+            return !g.selected_keys.contains(row.key);
+        });
+        const auto selection_label = select_all ? g.localizer.Text("action.select_all", "Select all")
+            : g.localizer.Text("action.deselect_all", "Deselect all");
+        if (ui->button_enabled(ui->user, StringView(selection_label + "###mod-batch-selection"), 0, 0, !rows.empty())) {
+            for (const auto& row : rows) {
+                if (select_all) g.selected_keys.insert(row.key);
+                else g.selected_keys.erase(row.key);
+            }
+        }
+        const auto draw_batch_toggle = [&](const std::string& label, const bool enabled) {
+            const auto eligible = [&](const Row& row) {
+                return row.enabled != enabled && (!enabled || !row.disabled) && g.selected_keys.contains(row.key);
+            };
+            ui->same_line(ui->user, 0, -1);
+            const bool available = !busy && !g.compatibility && std::any_of(rows.begin(), rows.end(), eligible);
+            if (ui->button_enabled(ui->user, StringView(label), 0, 0, available)) {
+                Action action{Kind::Toggle, {}, enabled};
+                for (const auto& row : rows) {
+                    if (eligible(row)) action.keys.push_back(row.key);
+                }
+                Request(std::move(action));
+            }
+        };
+        draw_batch_toggle(g.localizer.Text("action.bulk_enable", "Enable selected"), true);
+        draw_batch_toggle(g.localizer.Text("action.bulk_disable", "Disable selected"), false);
+        // Keep the controls above the scrolling list.
         const bool has_list = UiFieldAvailable(ui, offsetof(AnomalyUiServiceV1, begin_child),
                                   sizeof(decltype(AnomalyUiServiceV1::begin_child))) &&
             ui->begin_child && UiFieldAvailable(ui, offsetof(AnomalyUiServiceV1, end_child),
@@ -489,36 +627,46 @@ void ANOMALY_CALL Draw(void*, const AnomalyUiServiceV1* ui) noexcept {
             list.visible = ui->begin_child(ui->user, StringView("##mod-list"), 0.0f, 0.0f,
                                ANOMALY_UI_CHILD_V1_NONE) != 0;
         }
-        std::optional<std::vector<std::string>> group;
-        std::size_t shown{};
+        const Row* section{};
         if (list.visible) {
+            const bool square_checkbox = UiFieldAvailable(ui, offsetof(AnomalyUiServiceV1, checkbox_square),
+                sizeof(ui->checkbox_square)) && ui->checkbox_square;
             for (const auto& row : rows) {
-                const bool filtered = !g.filter.empty();
-                std::vector<std::string> labels;
-                if (filtered) {
-                    labels = CategoryLabels(row);
-                    const auto search = SearchText(row, labels);
-                    const bool matched = host_filter
-                        ? ui->filter_match(ui->user, StringView(g.filter), StringView(search)) != 0
-                        : ContainsFolded(search, g.filter);
-                    if (!matched) continue;
+                if (!section || (by_folder ? row.parent_folder != section->parent_folder : row.groups != section->groups)) {
+                    ui->separator(ui->user);
+                    section = &row;
+                    if (by_folder) {
+                        const auto folder = row.parent_folder.empty()
+                            ? g.localizer.Text("group.root_folder", "Mods root") : row.parent_folder;
+                        ui->text(ui->user, StringView(folder));
+                    } else {
+                        ui->text(ui->user, StringView(JoinNames(CategoryLabels(row))));
+                    }
                 }
-                ++shown;
-                if (!group || row.groups != *group) {
-                    ui->separator(ui->user); group = row.groups;
-                    if (labels.empty()) labels = CategoryLabels(row);
-                    ui->text(ui->user, StringView(JoinNames(labels)));
+                int selected = g.selected_keys.contains(row.key);
+                const auto label = "###selected-" + row.key;
+                bool changed{};
+                if (square_checkbox) {
+                    changed = ui->checkbox_square(ui->user, StringView(label), &selected) != 0;
+                } else if (ui->button_enabled(ui->user, StringView((selected ? "[x]" : "[ ]") + label), 0, 0, 1)) {
+                    selected = !selected;
+                    changed = true;
                 }
+                if (changed) {
+                    if (selected) g.selected_keys.insert(row.key);
+                    else g.selected_keys.erase(row.key);
+                }
+                ui->same_line(ui->user, 0, -1);
                 int enabled = row.enabled;
                 if (ui->checkbox(ui->user, StringView("##enabled-" + row.key), &enabled) && !busy && !g.compatibility && (row.enabled || !row.disabled))
-                    Request({Kind::Toggle, row.key, enabled != 0});
+                    Request({Kind::Toggle, {row.key}, enabled != 0});
                 ui->same_line(ui->user, 0, -1); ui->text(ui->user, StringView(row.name));
                 // The variants this mod replaces, on its own row: the section is the character.
                 if (!row.skins.empty()) { ui->same_line(ui->user, 0, -1); ui->text(ui->user, StringView(row.skins)); }
                 if (!row.complete) TextLocalized("row.incomplete", "Index unavailable.");
                 if (row.disabled) TextLocalized("row.disabled_files", "Files disabled; restore in Launcher.");
             }
-            if (shown == 0 && !rows.empty()) TextLocalized("search.empty", "No matching mods.");
+            if (rows.empty() && has_rows) TextLocalized("search.empty", "No matching mods.");
         }
     } catch (...) {}
 }
@@ -529,14 +677,20 @@ AnomalyStatusV1 ANOMALY_CALL Load(const AnomalyHostApiV1* api, void** context) n
         g.mods = host.Query<AnomalyModsServiceV1>(ANOMALY_MODS_SERVICE_V1_ID).get();
         g.scheduler = host.Query<AnomalySchedulerServiceV1>(ANOMALY_SCHEDULER_SERVICE_V1_ID).get();
         g.windows = host.Query<AnomalyWindowServiceV1>(ANOMALY_WINDOW_SERVICE_V1_ID).get();
+        g.config = host.Query<AnomalyConfigServiceV1>(ANOMALY_CONFIG_SERVICE_V1_ID).get();
         if (!context || !g.mods || g.mods->struct_size < sizeof(*g.mods) || !g.mods->synchronize ||
             !g.mods->assets || !g.mods->enumerate || !g.mods->set_enabled || !g.mods->compatibility_mode ||
             !g.scheduler || g.scheduler->struct_size < sizeof(*g.scheduler) ||
             !g.scheduler->schedule || !g.scheduler->cancel || !g.windows ||
+            !g.config || g.config->struct_size < offsetof(AnomalyConfigServiceV1, migrate) ||
+            !g.config->register_schema || !g.config->read || !g.config->write_atomic ||
             g.windows->struct_size < sizeof(*g.windows) || !g.windows->register_window ||
             !g.windows->release_window || !g.windows->state || !g.windows->begin || !g.windows->end)
             return {ANOMALY_STATUS_V1_UNAVAILABLE};
         g.compatibility = g.mods->compatibility_mode(g.mods->user) != 0;
+        g.saved_group_by_folder = g.group_by_folder = false;
+        g.settings_save_failed = false;
+        g.settings_ready = LoadSettings();
         LoadCategoryNames(ActiveLocale(
             host.Query<AnomalyLocalizationServiceV1>(ANOMALY_LOCALIZATION_SERVICE_V1_ID).get()));
         try { g.profile_valid = !g.compatibility && g.native.Load(api); } catch (...) { g.profile_valid = false; }
@@ -560,6 +714,12 @@ AnomalyStatusV1 ANOMALY_CALL Stop(void*, uint32_t) noexcept {
     AnomalyGenerationHandleV1 task{};
     { std::scoped_lock lock(g.mutex); g.stopping = true; task = g.task; }
     if (task.id) g.scheduler->cancel(g.scheduler->user, task);
+    if (!SaveSettings()) {
+        const auto core = Host(g.api).Query<AnomalyCoreServiceV1>(ANOMALY_CORE_SERVICE_V1_ID);
+        if (core && core->struct_size >= offsetof(AnomalyCoreServiceV1, log) + sizeof(core->log) && core->log)
+            core->log(core->user, ANOMALY_CORE_LOG_LEVEL_V1_WARNING,
+                StringView("Mod Manager: grouping preference flush failed"));
+    }
     return g.reload.Stop();
 }
 void ANOMALY_CALL Unload(void*) noexcept {

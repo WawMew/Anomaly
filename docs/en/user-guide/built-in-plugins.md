@@ -8,9 +8,43 @@ The runtime package ships with user-facing built-in plugins. Like third-party pl
 > [!NOTE]
 > `Nearby Pickup`, `Movement Hold Probe`, `Map Spawn Exporter`, `Teleport Landmarks Probe` and Navmesh Demo are developer test packages: neither the default build nor the released runtime package contains them, and only a runtime package built with `build.cmd testplugins` includes them (see [Building from source](../developer-guide/building.md)). The other plugins ship with the release runtime package.
 
+## Better Pose
+
+| | |
+| --- | --- |
+| **ID** | `anomaly.better-pose` |
+| **Purpose** | Pose, expression, keyframe and MMD-motion editing for the local player and Character Studio models. |
+| **Required services** | `anomaly.core`, `anomaly.config`, `anomaly.storage`, `anomaly.profile`, `anomaly.ui`, `anomaly.localization`; `anomaly.ue5.ahud`, `anomaly.input` (optional) |
+| **Requires Profile** | Yes (skeletal-mesh, render and reflection symbols) |
+
+The plugin writes bone poses directly instead of going through the game's animation playback. Its six
+pages are **Targets** (pick the model and show its skeleton), **Joints** (per-bone pitch/yaw/roll and a
+body offset, with mirror, reset and drag-on-overlay), **Expression** (morph targets), **Keyframes** (an
+on-screen timeline for recording, dragging and playing back), **MMD motion** (load a VMD file, map bones,
+tune the dynamic parameters) and **Library** (save and load poses).
+
+Every selected model keeps its own track and base pose, so switching targets never applies one model's
+pose to another. Manual posing is an offset from the base, which is whatever pose the model was in when
+editing started; the **A-pose base** button on the toolbar takes the base from the mesh's reference pose
+instead, so dragging a joint afterwards is relative to that A-pose. A keyframe is refused while the bones
+or the base are not ready, so a recording never silently misses data.
+
+Library poses can be used as keyframe material: load pose A, adjust it and record a keyframe, then load
+pose B and record another. A recorded keyframe stores the complete local rotation, translation and scale
+of every bone at that moment plus the body offset separately, so deleting or editing a library entry
+never changes keyframes already recorded. Rotation interpolates along the shortest path; translation and
+scale interpolate linearly. The `betterpose-keyframes` format keeps reading the older version 1 angle
+frames, and new files use version 2 with the local transforms embedded per bone name in
+`pose.localPose`; when both kinds are mixed, angle frames resolve against the current model's base pose.
+
+[Blender bridge](better-pose-blender.md) uses a separate `.bpmotion` channel and is not the same format as
+the keyframe motion files above.
+
 ## Skin Swapper Lite
 
 `Skin Swapper Lite` (`b1ank.skin-changer`) provides character accessories, glider and awakening appearance previews, and custom license plates. After you turn on **Apply plate** on the license plate page, the text follows the supported vehicles you drive afterwards; turning the switch off restores the original plate. **Animated plate** scrolls the text in a loop, and you can adjust the scroll interval. The panel shows the usable characters and the plate width. These changes only affect the local appearance, and awakening previews grant no combat bonuses.
+
+Turn on **Use Elyms's Y2K HUD** in the **HUD** tab to keep the theme active when changing scenes. Turn it off to restore the game’s HUD for the current outfit and scene. The plugin saves the setting.
 
 ## Coordinate Display
 
@@ -29,10 +63,10 @@ The plugin only reads data and does not modify game state. Use it to quickly con
 | --- | --- |
 | **ID** | `anomaly.nte-teleport` |
 | **Purpose** | Teleport the player to manually entered or read-out coordinates; supports crosshair-direction teleport, fixed-distance travel along the facing direction, and imported JSON points with category management. |
-| **Required services** | `anomaly.ui`, `anomaly.config`; `anomaly.input`, `anomaly.json`, `anomaly.scheduler`, `anomaly.plugin-state`, `anomaly.nte.session/player/player-teleport` (all V1, optional) |
+| **Required services** | `anomaly.ui`, `anomaly.config`, `anomaly.scheduler`; `anomaly.input`, `anomaly.json`, `anomaly.plugin-state`, `anomaly.nte.session/player/player-teleport` (all V1, optional) |
 | **Requires Profile** | Yes (player, session and the teleport bridge depend on validated symbols) |
 
-Crosshair teleport advances a preset distance along the current camera direction and clamps the target Z axis above the camera height plus a safety lift, so you do not land underground; forward teleport moves a preset distance along the horizontal facing. You can re-capture both hotkeys in the plugin window; a capture or an option edit is written to `anomaly.config` on the next tick (the host owns validation and the atomic replace) instead of waiting for the plugin to be disabled, and `on_stop` writes once more as a backstop. Clicking **Import points** reads a point array from a JSON file path (relative paths resolve against the plugin's private state directory) and supports `color`, `name`, `x/y/z` and an optional `category`; when `category` is missing, the plugin derives the category from prefixes such as `1. Name`. The import result persists with the settings when the plugin is disabled.
+Crosshair teleport advances a preset distance along the current camera direction and clamps the target Z axis above the camera height plus a safety lift, so you do not land underground; forward teleport moves a preset distance along the horizontal facing. You can re-capture both hotkeys in the plugin window; captures and option edits are coalesced and written to `anomaly.config` on the scheduler's Worker (the host owns validation and the atomic replace) instead of waiting for the plugin to be disabled, and `on_stop` synchronously flushes any pending changes. Clicking **Import points** reads a point array from a JSON file path (relative paths resolve against the plugin's private state directory) and supports `color`, `name`, `x/y/z` and an optional `category`; when `category` is missing, the plugin derives the category from prefixes such as `1. Name`. The import result persists with the settings when the plugin is disabled.
 
 ## 999 Nights Script
 
@@ -40,16 +74,22 @@ Crosshair teleport advances a preset distance along the current camera direction
 | --- | --- |
 | **ID** | `wawmew.night999` |
 | **Purpose** | Fully automated monster farming loop for the 999 Nights instance. |
-| **Required services** | `anomaly.ui`; `anomaly.core`, `anomaly.nte.session/player/player-teleport/navigation/combat/skills/skill-invocation/actors/entities/pickup`, `anomaly.ue5.names/objects/world/framework`, `anomaly.interop.signature` (all V1, optional) |
+| **Required services** | `anomaly.ui`; `anomaly.core`, `anomaly.nte.session/player/player-teleport/navigation/combat/skills/skill-invocation/actors/entities/pickup/ui-buttons`, `anomaly.ue5.names/objects/world/framework`, `anomaly.interop.signature` (all V1, optional) |
 | **Requires Profile** | Yes (session and player snapshots, the teleport bridge, reflection lookup and auto combat all depend on validated symbols) |
 
 **This script is for the Red Dragon Castle map in 999 Nights**. The window has two tabs, **Start** and **Settings**.
 
 **Start** page: the **Loop count** input box (**0 = infinite loop**), the **Start script / Stop script** buttons, and the live status line below them (`Round N/M · current step`).
 
-**Settings** page: three teleport points (camp, combat point 1, combat point 2), each with three coordinate rows (X / Y / Z) that you can edit directly, or you can click **Read current position as camp** / **Read current position as combat point 1** / **Read current position as combat point 2** to fill in the player's current coordinates (visible in the same frame); below that come the preload delay, and the auto combat switches and parameters.
+**Settings** page: at the top, the **Refresh method** choice between **Memory refresh** and **Button refresh**; below that, three teleport points (camp, combat point 1, combat point 2), each with three coordinate rows (X / Y / Z) that you can edit directly, or you can click **Read current position as camp** / **Read current position as combat point 1** / **Read current position as combat point 2** to fill in the player's current coordinates (visible in the same frame); below that come the preload delay, and the auto combat switches and parameters.
 
 A loop always runs six steps: teleport to camp → refresh monsters → teleport to combat point 1 → auto combat → teleport to combat point 2 → auto combat, then back to camp for the next round (repeats the configured number of times, **0 = unlimited**; every teleport waits 2 seconds to settle after landing).
+
+**Memory refresh** calls the game's own refresh function `FinalTowerCampResetMonsterSpawners` and needs no UI open. It checks the cooldown first: at 0 seconds it sends the request right away; between 1 and 10 seconds it waits "cooldown + 1 second" and then sends; above 10 seconds it assumes the spawn was just refreshed (usually a manual click) and **skips the refresh**, going straight to combat point 1. After sending it also confirms the cooldown was actually written: if the cooldown is still 0 within 4 seconds it sends again, up to 3 rounds. When the cooldown reading is unavailable in a given environment the refresh is not blocked; the attempt is treated as sent.
+
+**Button refresh** does not touch memory: it presses the game's own buttons — `InteractButton` (every one that exists, which opens the campfire panel), then `BtnResetMonsterSpawners`, then `BtnSure` when that step opens a confirmation dialog (skipped when the dialog never shows), then `BtnReset`. Scans and clicks are at least 200 milliseconds apart; a click counts as successful once the button disappears, hides or becomes unclickable, otherwise it retries up to 2 more times. Scanning stops as soon as `BtnReset` was pressed. When the panel opens with a disabled (unclickable) `BtnResetMonsterSpawners`, or the button has not shown up after 5 scans, the plugin presses `BtnClose`, waits 10 seconds and presses `InteractButton` again, up to 6 retries; after 6 failed retries it reports the error and stops the script. Button refresh requires the player to stand next to a campfire.
+
+When a refresh failure is not a cooldown matter (the `FinalTowerCampResetMonsterSpawners` function cannot be found, the local player state is missing, `ProcessEvent` rejects the call, no campfire id is readable, the cooldown is still 0 after 3 rounds, or — for button refresh — no clickable `InteractButton` / `BtnResetMonsterSpawners` / `BtnReset` shows up or the button stays clickable after the retries), the **Start** page shows a `Refresh error: <reason>` line and the script stops instead of heading to the combat points with an empty camp.
 
 The auto combat end conditions (hitting any one of them ends it and moves on to the next round):
 
@@ -60,6 +100,10 @@ The auto combat end conditions (hitting any one of them ends it and moves on to 
 The check does not use damage readings: when the damage stream is unreadable (stale offsets or mismatched participant handles), "how long since the last damage" becomes true while the monsters are still alive, and the script teleports away from a point that is not finished. Damage is only used inside the module to switch targets; it does not take part in deciding whether this point is complete.
 
 ## NTE Damage Dashboard
+
+> [!WARNING]
+> Archived: it is no longer built or shipped, and it does not appear in the plugin list. The source stays in
+> `plugins/DamageDashboard/` (see `ARCHIVED.md`); what follows documents it as it was, for reference only.
 
 | | |
 | --- | --- |
@@ -246,6 +290,29 @@ The plugin adjusts two existing sets of knobs directly and does not add or repla
 - Vehicles: the `MassSpawner` spawn count multiplier and spawn cap, plus the guaranteed online vehicle count of `HTMassVehicleSpawner`.
 
 When checked, it first reads the **current values** of these fields as the initial values and writes them to disk, then pushes them to the minimum; it only writes once when checking and once when unchecking, with no periodic polling or write-back. Disabling or reloading the plugin also restores the initial values, so the world is not left with empty streets. The window hotkey is fixed at F8, the toggle hotkey is changeable and unbound by default; the checked state and the initial values persist in the plugin storage directory.
+
+## Summon Lab
+
+| | |
+| --- | --- |
+| **ID** | `anomaly.summon-lab` |
+| **Purpose** | Summon and manage blueprints and playable character clones, including attributes, model scale and battle relationships. |
+| **Required services** | `anomaly.ui`, `anomaly.localization`, `anomaly.config`, `anomaly.profile`, `anomaly.json`, `anomaly.core`, `anomaly.ue5.objects`, `anomaly.ue5.names`, `anomaly.ue5.process-event`, `anomaly.nte.session`, `anomaly.nte.player`, `anomaly.interop.signature`, `anomaly.interop.hook`, `anomaly.scheduler`, `anomaly.storage` |
+| **Requires Profile** | Yes; the host loads and validates the package profile before the plugin uses its compatible layouts and symbols. |
+
+The window pages are **Blueprints / Characters / Presets / Attributes / Editor / Summon / Manage**. The **Editor** tab remains visible in character mode, but is greyed out and cannot be clicked because its blueprint-only field, ability and effect rules do not apply to playable character clones. It becomes available again when blueprint mode is selected.
+
+**Characters** lists public playable character entries and excludes NPC and non-public entries. Select a character, configure the next batch's health, attack, defense and other supported attributes on **Attributes**, then set the name, quantity and spacing on **Summon**. Character clones use the game's native mirrored-character construction, combat effects and automatic skill flow, with the player's level. Failed initialization or attribute verification removes the affected clone and stops the remaining batch.
+
+The **Manage** page contains clones and ordinary summoned entities together. It provides opponent selection, battle groups, target priorities, chase distance and stop controls. Clones can fight other clones and ordinary summons, subject to the game's native camp relationships. The **Do not target the player** option can be selected before summoning; without an assigned opponent, the clone stays idle.
+
+Blueprint mode provides the asset catalog, optional source combat configuration, per-blueprint editor rules and batch summon controls. The blueprint catalog is refreshed from the game's Asset Registry and cached through the host storage service. The editor can override supported boolean, 32-bit integer and floating-point blueprint fields, remove selected GameplayAbility classes, and continuously clear selected GameplayEffect classes for future summons. These rules apply only to plugin-managed instances and may not undo logic that already ran during construction.
+
+Blueprints and character clones share **Model Scale**. Set the next batch's scale on **Summon**, or adjust an individual entity or group on **Manage**; **Restore Original Size** returns the first recorded scale. Attached effects that inherit model scale follow the model, while independently spawned or absolute/world-space effects are not guaranteed to scale with it. Scale settings and presets are persisted through `anomaly.config`.
+
+Summon batches use the selected blueprint or character, name, level and attributes captured when the summon button is clicked. The grid starts from the player's position and facing, avoids managed entities and blocked cells, and can be cancelled while pending. Boss music, boss dialogue and cutscene suppression are independent per-batch options.
+
+The plugin stores the current selection, filters, summon settings and presets through the host configuration service, so they survive plugin reloads and game restarts. Profile compatibility data stays in the package profile and is never written back by user settings.
 
 ## NTE Vehicle
 

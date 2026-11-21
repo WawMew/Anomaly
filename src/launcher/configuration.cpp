@@ -466,7 +466,12 @@ LauncherConfigurationLoadResult LoadLauncherConfiguration(
             if (document.contains("view") && document.at("view").is_object()) {
                 const auto& view = document.at("view");
                 LauncherViewSettings& settings = result.configuration.view;
+                if (const auto limit = view.find("frameRateLimit");
+                    limit != view.end() && limit->is_number_integer()) {
+                    settings.frame_rate_limit = LauncherFrameRatePreset(limit->get<double>());
+                }
                 settings.mods_grid = view.value("modsGrid", settings.mods_grid);
+                settings.mods_by_folder = view.value("modsByFolder", settings.mods_by_folder);
                 settings.mods_pagination =
                     view.value("modsPagination", settings.mods_pagination);
                 settings.mods_page_size = LauncherNearestPageSize(
@@ -566,7 +571,9 @@ LauncherConfigurationSaveResult SaveLauncherConfiguration(
                 {"border", HexColorText(configuration.custom_colors.border)},
             }},
             {"view", {
+                {"frameRateLimit", LauncherFrameRatePreset(configuration.view.frame_rate_limit)},
                 {"modsGrid", configuration.view.mods_grid},
+                {"modsByFolder", configuration.view.mods_by_folder},
                 {"modsPagination", configuration.view.mods_pagination},
                 {"modsPageSize", configuration.view.mods_page_size},
                 {"browseSort", configuration.view.browse_sort},
@@ -690,6 +697,12 @@ LauncherClientConfiguration DiscoverLauncherConfiguration(
     AddAncestors(roots, result.game_directory);
     AddAncestors(roots, result.launcher_executable.parent_path());
 
+    if (result.launcher_executable.empty()) {
+        if (const auto discovered = FindLauncherExecutable(roots, options.client)) {
+            result.launcher_executable = *discovered;
+            AddAncestors(roots, result.launcher_executable.parent_path());
+        }
+    }
     if (result.game_directory.empty()) {
         std::vector<std::filesystem::path> launcher_roots;
         AddAncestors(launcher_roots, result.launcher_executable.parent_path());
@@ -701,11 +714,6 @@ LauncherClientConfiguration DiscoverLauncherConfiguration(
                 result.game_directory = *searched;
                 AddAncestors(roots, result.game_directory);
             }
-        }
-    }
-    if (result.launcher_executable.empty()) {
-        if (const auto discovered = FindLauncherExecutable(roots, options.client)) {
-            result.launcher_executable = *discovered;
         }
     }
     return result;

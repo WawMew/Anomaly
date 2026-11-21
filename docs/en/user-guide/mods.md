@@ -22,11 +22,12 @@ The page shows the directory in use:
 | --- | --- |
 | Grid (default) | The view switch beside the list, with the grid first and selected: categories first, each card showing the cover of the category's first mod and its mod count; a click opens that category, which lists its skins as cards of their own (each showing that skin's first cover and mod count) when it has more than one, and a further click opens one skin's mods. Above the cards is the path: **All** returns to the outermost level and every named level in the path is clickable too, so no level needs to be left one step at a time. Every mod appears once, and the skins it also covers are part of its card metadata. Every level uses cards of the same size, covers are shown whole, several fit a row, and each card has a surface of its own; a mod card puts the enable switch, the batch box and, when the mod has them, **Source** and **Update** on its first row, and only **Settings** and **Uninstall** under them |
 | List | The same data as rows: switch, cover, name, file count, size, author and version, then the same commands on the right: Update (with a new version), Settings, Uninstall and Source (with a link), and the batch box last. A command a mod does not have leaves its column empty, so the box lines up down the list |
+| Group by folder | Show mods by their relative directory under `~mods`. Both Launcher layouts support nested folders, and the in-game Mod Manager uses relative folder paths as section headings. Each view saves its own preference. |
 | Pagination | **Off by default**: both views list every mod at once and only the list area scrolls. Turn it on under **Settings > Mods page** and set the page size; the pager is a floating glass capsule centred at the bottom of the list |
 | Enable / disable | Hot mode saves a selection for runtime mount/unmount; compatibility mode adds/removes `.disabled` on container files while the game is closed |
 | Enable switch | Enabling a mod disables conflicting model/resource replacements and synchronizes with the in-game Mod Manager |
 | Uninstall | Deletes the mod's files or folder |
-| Settings | One dialog holds everything about a mod: display name, its file or folder name on disk, group, notes and the GameBanana link. Saving renames first and then writes the notes |
+| Settings | One dialog holds everything about a mod: display name, its file or folder name on disk, groups, notes and the GameBanana link. Saving renames first and then writes the notes |
 | Import archive | Extracts ZIP, 7z or RAR archives and copies `.pak/.utoc/.ucas/mod.json` into `~mods\<archive name>\` |
 | Search | Matches display name, folder name and author |
 | Filter | All / enabled / disabled tabs; changing the tab or search resets to page 1 |
@@ -166,8 +167,9 @@ definitions with the currently mounted game containers, including parents, field
 and nested types. An incompatible definition and its affected dependencies within the candidate container
 are retained from the game in a separate compatibility container. Other mod resources can still load.
 Retained package names are reported in mount status and logs; this policy has no mod-name or vehicle exceptions.
-Unreadable formats, inseparable new dependencies and unsupported optional packages are refused before mounting,
-preserving the existing mounted set for that pass. This inspection covers supported Zen package formats;
+Unreadable formats, inseparable new dependencies and unsupported optional packages are refused before mounting.
+A refused replacement keeps its previous mount, and other containers continue. Synchronization errors identify
+the failed container and the reason. This inspection covers supported Zen package formats;
 legacy standalone pak files keep their existing path, and schema compatibility does not guarantee script behavior.
 
 Unmount drains async package loading on the Game thread, then removes the source before its compatibility
@@ -208,14 +210,18 @@ The independent **Mod Manager** plugin and Launcher classify mods from `.pak` an
 The classification has two levels: one group per character, and the skins inside it. Zero's base outfit and
 swimsuit land in the `female` and `female_swimsuit` skins of `Player_051` (`Player_051/female` and
 `Player_051/female_swimsuit` as the index spells them). A mod that covers several skins is filed under the first
-of them and carries the others as tags on its cover or row, so it neither makes a category out of the combination
+of them, so it neither makes a category out of the combination
 nor shows up twice; the skins of one character can be on at the same time, and their mod counts add up to the
 count of the character. Blackbird's base and evolved forms are different skins. Skin mesh ownership takes
 priority over companion materials and variant helpers; texture-only mods use their resource directories.
 The pendant replacement uses `Pendant_07`; borrowed texture filenames do not change ownership. Other resources use their content directory,
-such as `/game/wwiseaudio` for audio. Unreadable indices remain unclassified. A category with a single skin
-does not grow an extra level; its mods are listed directly. A hand-written group replaces the automatic
-classification and takes that mod out of the two levels.
+such as `/game/wwiseaudio` for audio. Unreadable indices remain unclassified. Automatic categories with a
+single skin list their mods directly. Custom groups start with one level; use **+** to add levels up to
+five, and **−** to remove the last level. Type a name or select an existing group under the same parent.
+Both grid and list views show the full hierarchy. Saving groups for a folder mod moves it to
+`~mods/level-one/level-two/…/mod-folder`, preserving its selection and per-container overrides. Existing targets are never merged or overwritten.
+**Restore defaults** clears custom groups; saving restores automatic classification and moves the folder back to its automatic category.
+Existing one- and two-level settings remain valid, and renaming or updating a mod preserves its full path.
 Grouping alone does not make mods mutually exclusive: non-overlapping outfits can coexist. A mod that covers
 several skins conflicts with a mod covering any of them and coexists with the mods of skins it does not touch --
 exclusivity always comes from resources and chunk IDs, never from a whole character or skin.
@@ -261,8 +267,9 @@ for the category folder (`character/`) still covers every mod below it.
 (`~mods/Player_051 零/ModB/`) and moves its selection key with it: a key is a path, so a key left behind
 would quietly turn off mods back on. Mods already in place stay where they are, and a target that already
 exists is skipped instead of merged. It also runs while the game is open: a folder the engine still holds
-open is skipped and reported, and one more pass after closing the game finishes it; a mod filed by hand
-under some other folder is moved to the folder its category names.
+open is skipped and reported, and one more pass after closing the game finishes it. Mods with custom
+groups are skipped and keep their folders and groups.
+A mod moved by hand without setting a custom group still follows automatic organisation.
 
 After a manual folder move, each container with no saved selection for its current path inherits the selection
 saved for its mod's name: the folder name, or the `.pak` filename of a loose container. Multiple containers in
@@ -348,7 +355,7 @@ cannot add this interface to an older Core.
 
 | Symptom | Check first |
 | --- | --- |
-| Mod has no effect | `available`, `state`, `lastError` in `pak status`, and the engine reason in `pak_mods.mount_failed` |
+| Mod has no effect | Check `lastError` and each container's `state` and `message` in `pak status`, and the `pak_mods.compatibility_refused` and `pak_mods.mount_failed` log entries. |
 | Empty list | Directory path, `.disabled` markers, and the manifest's `mods` array |
 | Cannot overwrite/disable files | Release status and outstanding reads; exit the game if files remain busy |
 | Mounted but resources unchanged | Whether resources were already resident; mounts do not refresh them |
@@ -401,6 +408,7 @@ Every launcher interface choice is stored in its own configuration, `<launcher>\
 | `theme` | Palette the launcher wears (default `naiwa`) |
 | `language` | Launcher language: `auto` (follow Windows), `zh-CN`, `en-US` |
 | `view.modsGrid` | Mods page layout (`true` = grid, the default; `false` = list) |
+| `view.modsByFolder` | Group mods by folder (default `false`, using automatic categories or custom groups) |
 | `view.modsPagination` | Whether the mods page paginates (default `false`) |
 | `view.modsPageSize` | Mods per page when it does (default `10`) |
 | `view.browseSort` | Download-page ordering (`default` / `new` / `downloads` / `views` / `likes`) |
@@ -421,7 +429,7 @@ The launcher's mods page does not paginate by default: both views list every mod
 
 ## Known limits
 
-- Import and download remain available while the game runs. Hot mode can switch mods; disabled mods can be updated, renamed or uninstalled once the engine releases their files. Compatibility mode cannot switch live; new imports stay disabled until enabled after exiting the game.
+- Import and download remain available while the game runs. Newly downloaded or locally imported mods default to disabled and must be enabled manually. Replacing or updating an existing mod preserves its previous selection. Hot mode can switch mods; disabled mods can be updated, renamed or uninstalled once the engine releases their files. Compatibility mode cannot switch live; new imports stay disabled until enabled after exiting the game.
 - Import and update keep the target disabled until all container files have been copied. Failed operations leave it disabled.
 - Without runtime loading, every change needs a game restart — paks are mounted at start-up only.
   With it, containers can be added, released and replaced at runtime
